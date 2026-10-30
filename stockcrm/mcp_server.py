@@ -388,6 +388,43 @@ def propose_checkpoint_resolution(checkpoint_id: int, status: str, rationale: st
 
 
 @server.tool()
+def get_maintenance_status() -> str:
+    """Last run of each maintenance job (backup, fetch_monthly, fetch_quarterly, fetch_shares, quality, morning)
+    and the current data-quality report: edges without source, critical drivers without model values, holdings
+    without invalidation or drivers, proposals pending >14 days, stale holdings, overdue checkpoints, TW
+    companies whose monthly revenue is not current. Use it to tell the user what needs upkeep."""
+    with _conn() as c:
+        return _j({"last": {j: core.last_run(c, j) for j in ("backup", "fetch_monthly", "fetch_quarterly",
+                                                             "fetch_shares", "quality", "morning")},
+                   "quality": core.data_quality_report(c)})
+
+
+@server.tool()
+def fetch_official_data(job: str = "fetch-monthly") -> str:
+    """Pull official facts from TWSE/TPEx open data and write them directly as actuals (created_by system:mops):
+    job = fetch-monthly (monthly revenue for all tracked TW companies, plus previous month and last year's month)
+        | fetch-quarterly (YTD income statement; single-quarter revenue_q/gross_margin/opex/eps derived when the
+          previous quarter is stored) | fetch-shares (shares outstanding, thousands) | backup | quality.
+    Allowed without a proposal because these are sourced facts, not judgments. Needs network."""
+    import sys as _sys
+    scripts = str(Path(__file__).resolve().parent.parent / "scripts")
+    if scripts not in _sys.path:
+        _sys.path.insert(0, scripts)
+    import maintain  # noqa: E402
+    if job not in maintain.JOBS:
+        return f"job must be one of {list(maintain.JOBS)}"
+    key, fn = maintain.JOBS[job]
+    with _conn() as c:
+        try:
+            summary, details = fn(c)
+        except Exception as e:
+            core.log_maintenance(c, key, "error", f"{type(e).__name__}: {e}")
+            return f"error: {type(e).__name__}: {e}"
+        core.log_maintenance(c, key, "ok", summary, details)
+        return _j({"summary": summary, "details": details})
+
+
+@server.tool()
 def propose_metric(company: str, metric: str, period: str, value: float, rationale: str,
                    source: str | None = None, kind: str = "actual") -> str:
     """Propose an actual metric you fetched (monthly revenue release, quarterly report).

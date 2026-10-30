@@ -190,6 +190,38 @@ def apply_checks():
         return core.apply_health_flags(c)
 
 
+# ---- maintenance
+@app.get("/api/maintenance")
+def maintenance():
+    with conn() as c:
+        return {"log": core.list_maintenance(c, 30), "quality": core.data_quality_report(c),
+                "last": {j: core.last_run(c, j) for j in ("backup", "fetch_monthly", "fetch_quarterly", "fetch_shares",
+                                                           "quality", "morning")}}
+
+
+@app.post("/api/maintenance/run")
+async def maintenance_run(req: Request):
+    """Run one maintenance job now (the same code the scheduler runs)."""
+    import sys as _sys
+    scripts = Path(__file__).resolve().parent.parent / "scripts"
+    if str(scripts) not in _sys.path:
+        _sys.path.insert(0, str(scripts))
+    import maintain  # noqa: E402  (scripts/maintain.py)
+    b = await body(req)
+    job = b.get("job")
+    if job not in maintain.JOBS:
+        raise HTTPException(400, f"job must be one of {list(maintain.JOBS)}")
+    key, fn = maintain.JOBS[job]
+    with conn() as c:
+        try:
+            summary, details = fn(c)
+        except Exception as e:
+            core.log_maintenance(c, key, "error", f"{type(e).__name__}: {e}")
+            raise HTTPException(502, f"{type(e).__name__}: {e}")
+        core.log_maintenance(c, key, "ok", summary, details)
+        return {"job": job, "summary": summary, "details": details}
+
+
 @app.post("/api/positions/{pid}/thesis_status")
 async def thesis_status(pid: int, req: Request):
     b = await body(req)

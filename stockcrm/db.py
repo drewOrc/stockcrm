@@ -193,6 +193,33 @@ CREATE TABLE IF NOT EXISTS proposals (
   applied_ref TEXT
 );
 
+-- Raw year-to-date figures from the quarterly income statement (TWSE/TPEx open data publish YTD).
+-- Single-quarter metrics are derived by differencing consecutive quarters. Thousands of TWD.
+CREATE TABLE IF NOT EXISTS financials_ytd (
+  id           INTEGER PRIMARY KEY,
+  company_id   TEXT NOT NULL REFERENCES companies(id),
+  year         INTEGER NOT NULL,
+  quarter      INTEGER NOT NULL CHECK (quarter BETWEEN 1 AND 4),
+  revenue      REAL,
+  gross_profit REAL,
+  opex         REAL,
+  net_income   REAL,
+  eps          REAL,
+  source       TEXT,
+  fetched_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (company_id, year, quarter)
+);
+
+-- Every automated job writes one row here, so "who touched the data and when" is always answerable.
+CREATE TABLE IF NOT EXISTS maintenance_log (
+  id      INTEGER PRIMARY KEY,
+  ts      TEXT NOT NULL DEFAULT (datetime('now')),
+  job     TEXT NOT NULL,                -- backup | fetch_monthly | fetch_quarterly | fetch_shares | quality | morning
+  status  TEXT NOT NULL CHECK (status IN ('ok','error','skipped')),
+  summary TEXT NOT NULL,
+  details TEXT                          -- JSON
+);
+
 CREATE TABLE IF NOT EXISTS tier_rules (
   tier     TEXT PRIMARY KEY CHECK (tier IN ('core','satellite','watch','blacklist')),
   max_pct  REAL NOT NULL,

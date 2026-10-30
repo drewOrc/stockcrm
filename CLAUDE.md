@@ -28,6 +28,7 @@
 
 | 情況 | 用什麼 |
 |---|---|
+| **官方事實**（證交所／櫃買開放資料：月營收、季報六個數、股數） | `fetch_official_data` 或 `scripts/maintain.py` 直接寫入 `actual`，`created_by=system:mops`，帶來源網址。不經提案，因為沒有判斷成分 |
 | 使用者**明確要你記錄或口述**的事（我今天買了 2330、幫我加到觀察清單、提醒我 11/19、把 Excel 裡的模型值填進去） | `log_interaction`、`add_to_watchlist`、`add_reminder`、`add_driver`、`set_driver_value`、`add_checkpoint`、`set_metric`、`apply_template` 直接寫 |
 | 你**自己從外部資訊推斷**的事（新聞、財報、法說逐字稿、年報、月營收公告） | `propose_interaction`、`propose_edge`、`propose_thesis_status`、`propose_reminder`、`propose_driver`、`propose_driver_value`、`propose_checkpoint`、`propose_checkpoint_resolution`、`propose_metric` |
 | 改論點內容、改部位大小、改階段或分層、直接改論點狀態 | 不要做。告訴使用者，請他在網頁上改（健康度警示有「標為動搖」按鈕） |
@@ -56,6 +57,18 @@
 **使用者要加碼**：先 `check_tier_limit`，超過分層上限要明講，再 `log_interaction(kind="add")`。
 
 **讀法說會或年報**：找「主要客戶」段落，用 `propose_edge` 新增或修正邊，`source` 寫清楚出處，不確定就 `confidence="low"`。
+
+## 維護模式（agent 負責維護資料庫）
+
+三種資料、三種做法：官方事實腳本直接寫；需要解讀的（法說裡的數字、新聞對檢查點的影響）走提案；判斷（論點狀態、模型值、部位）只有使用者能改。
+
+- **每天早上**（排程 `scripts/morning.ps1`）：`maintain.py all`（備份 → 抓月營收／季報／股數 → 品質報告 → 健康度）再跑 `scripts/morning_prompt.md` 的 agent 任務，簡報寫到 `data/reports/morning-日期.md`。
+- **每天傍晚**：只抓官方資料（月營收在 1 到 10 號收盤後陸續公布）。
+- 季報開放資料是**年初至今（YTD）**，單季數字要前一季也在庫裡才推得出來；缺的那季請使用者給或你從季報提案。
+- `get_maintenance_status` 看每個工作最後一次執行與資料品質問題；`fetch_official_data(job)` 可以立刻抓。
+- 備份在 `data/backups/`，保留 30 天；每次 `maintain.py all` 先備份再寫入。
+- 所有自動寫入都在 `maintenance_log` 留紀錄；回答「這個數字哪來的」時查 metrics 的 `source` 與 `created_by`。
+- 品質報告裡的項目是你的待辦：沒有來源的邊去找年報補；沒有模型值的關鍵驅動因子提醒使用者填；放太久的提案提醒使用者批。
 
 ## 慣例
 

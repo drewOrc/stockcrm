@@ -406,15 +406,39 @@ async function loadMorning() {
         <div class="kv" style="margin-top:10px">${m.tw_monthly_revenue_window ? "現在是台股月營收公布期間（1 到 10 號）。" : "台股月營收公布期間是每月 1 到 10 號。"} 待審提案 ${m.pending_proposals} 件。</div>
       </div>
       <div class="panel"><h3>交給 agent 的早晨任務</h3>
-        <div class="kv" style="margin-bottom:6px">在 Claude Code 裡貼上這段，它會透過 MCP 讀取同一份資料並提案：</div>
+        <div class="kv" style="margin-bottom:6px">排程每天會自動跑一次（scripts/morning.ps1）。要手動跑，在 Claude Code 裡貼上這段：</div>
         <pre class="prompt" id="prompt-text">${esc(prompt)}</pre>
         <button class="ghost tiny" id="btn-copy">複製</button>
       </div>
+      <div class="panel" id="maint-panel"><h3>維護狀態</h3><div class="kv">載入中…</div></div>
     </div>`;
   $("#btn-copy").onclick = () => navigator.clipboard.writeText($("#prompt-text").textContent).then(() => toast("已複製"));
+  loadMaintenance();
   $$("#morning [data-open]").forEach((a) => a.onclick = () => openCard(a.dataset.open));
   const af = $("#btn-apply-flags");
   if (af) af.onclick = async () => { const r = await api("/checks/apply", { method: "POST" }); toast(`已將 ${r.length} 張卡片標為動搖`); loadMorning(); loadBoard(); };
+}
+
+/* ---------------- maintenance */
+const JOB_L = { backup: "備份", fetch_monthly: "月營收", fetch_quarterly: "季報", fetch_shares: "股數", quality: "品質檢查", morning: "早晨簡報", health: "健康度" };
+const Q_L = { edges_without_source: "沒有來源的供應鏈關係", critical_drivers_without_model: "沒有模型值的關鍵驅動因子", holdings_without_invalidation: "沒有失效條件的持股", holdings_without_drivers: "沒有驅動因子的持股", proposals_pending_too_long: "放超過兩週沒批的提案", stale_holdings: "超過 30 天沒更新的持股", overdue_checkpoints: "逾期檢查點", tw_companies_missing_recent_revenue: "月營收不是最新的台股公司" };
+async function loadMaintenance() {
+  const el = $("#maint-panel");
+  if (!el) return;
+  const m = await api("/maintenance");
+  const last = Object.entries(m.last).map(([j, r]) => `<div class="rel"><span>${JOB_L[j] || j}</span><span class="kv">${r ? `<span class="status ${r.status === "ok" ? "approved" : r.status === "error" ? "rejected" : ""}">${r.status}</span> ${tpe(r.ts)} · ${esc(r.summary)}` : "還沒跑過"}</span></div>`).join("");
+  const q = Object.entries(Q_L).filter(([k]) => (m.quality[k] || []).length).map(([k, label]) => `<details><summary>${label}（${m.quality[k].length}）</summary><ul class="issues">${m.quality[k].map((it) => `<li class="low">${esc(Object.entries(it).filter(([, v]) => v != null).map(([kk, v]) => `${kk}=${v}`).join("，"))}</li>`).join("")}</ul></details>`).join("");
+  el.innerHTML = `<h3>維護狀態 <span class="kv">腳本直接寫入官方事實（system:mops），其餘走提案</span></h3>
+    ${last}
+    <div style="margin:10px 0 6px;display:flex;gap:6px;flex-wrap:wrap">
+      <button class="ghost tiny" data-job="fetch-monthly">抓月營收</button><button class="ghost tiny" data-job="fetch-quarterly">抓季報</button>
+      <button class="ghost tiny" data-job="fetch-shares">抓股數</button><button class="ghost tiny" data-job="backup">備份</button><button class="ghost tiny" data-job="quality">品質檢查</button>
+    </div>
+    <div><b>資料品質（${m.quality.total}）</b>${q || '<div class="kv">沒有問題。</div>'}</div>`;
+  $$("#maint-panel [data-job]").forEach((b) => b.onclick = async () => {
+    b.disabled = true; b.textContent = "執行中…";
+    try { const r = await api("/maintenance/run", { method: "POST", body: { job: b.dataset.job } }); toast(r.summary); } finally { loadMaintenance(); }
+  });
 }
 
 /* ---------------- proposals */

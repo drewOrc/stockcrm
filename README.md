@@ -35,6 +35,30 @@ python -m stockcrm.api        # 開 http://127.0.0.1:8765
 互動紀錄可以掛到驅動因子或檢查點上，標「支持 / 削弱 / 確認」。健康度檢查把三者彙整，早晨頁列出需要注意的卡片，
 由你決定要不要一鍵標為動搖。建卡片時可以套用論點模板（轉型股、成長股、景氣循環股、供應鏈受惠股）。
 
+## 維護：讓 agent 顧資料庫
+
+| 資料 | 誰寫 | 怎麼寫 |
+|---|---|---|
+| 官方事實：月營收、季報六個數、股數（證交所／櫃買開放資料，免金鑰） | 腳本 | 直接寫入，`created_by=system:mops`，帶來源 |
+| 需要解讀：法說裡的台數與占比、新聞對檢查點的影響 | agent | 提案，你在網頁核准 |
+| 判斷：論點狀態、模型值、部位、目標價 | 你 | 網頁 |
+
+```bash
+python scripts/maintain.py all        # 備份 → 抓官方資料 → 品質報告 → 健康度，寫 data/reports/maintenance-日期.md
+python scripts/maintain.py quality    # 只看資料品質
+```
+
+Windows 排程（目前使用者，不需管理員）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1 -MorningAt 08:30 -EveningAt 19:30
+```
+
+早上那次會接著用 Claude Code 跑 `scripts/morning_prompt.md`（只允許 stockcrm MCP 工具與網路查詢），簡報在 `data/reports/morning-日期.md`。
+找不到 `claude` 指令時會自動用 Claude 桌面版附帶的那份，或用環境變數 `STOCKCRM_CLAUDE` 指定。
+
+季報開放資料是年初至今的累計數，單季數字在連續兩季都抓到之後才會出現。早晨頁最下方有「維護狀態」面板，可以手動觸發每個工作。
+
 ## 開發
 
 ```bash
