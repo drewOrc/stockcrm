@@ -309,6 +309,22 @@ def proposals(status: str = "pending"):
         return core.list_proposals(c, None if status == "all" else status)
 
 
+@app.post("/api/proposals")
+async def create_proposal(req: Request):
+    """For other local services (e.g. the twstock-tracker engine) to propose changes instead of
+    writing CRM tables directly. body: {kind, payload, rationale, created_by}. Same shape as list_proposals rows."""
+    b = await body(req)
+    for k in ("kind", "payload", "rationale", "created_by"):
+        if k not in b or b[k] in (None, ""):
+            raise HTTPException(400, f"missing {k}")
+    if not isinstance(b["payload"], dict):
+        raise HTTPException(400, "payload must be an object")
+    with conn() as c:
+        pr = guard(core.create_proposal, c, b["kind"], b["payload"], b["rationale"], str(b["created_by"]))
+        pr["summary"] = core._proposal_summary(c, pr)
+        return pr
+
+
 @app.post("/api/proposals/{pid}/decide")
 async def decide(pid: int, req: Request):
     b = await body(req)
