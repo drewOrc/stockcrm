@@ -43,7 +43,8 @@ async def body(req: Request) -> dict[str, Any]:
 def enums():
     return {"stages": db.STAGES, "tiers": db.TIERS, "thesis_statuses": db.THESIS_STATUSES,
             "interaction_kinds": db.INTERACTION_KINDS, "reminder_kinds": db.REMINDER_KINDS,
-            "confidences": db.CONFIDENCES, "markets": db.MARKETS}
+            "confidences": db.CONFIDENCES, "markets": db.MARKETS, "effects": db.EFFECTS,
+            "metrics": db.METRICS, "metric_labels": db.METRIC_LABELS, "relations": db.RELATIONS}
 
 
 @app.get("/api/tier_rules")
@@ -75,9 +76,14 @@ async def upsert_position(req: Request):
         if b.get("market") and b.get("ticker") and b.get("name"):
             comp = guard(core.upsert_company, c, b["market"], b["ticker"], b["name"], b.get("name_en"), b.get("sector"))
             b["company_id"] = comp["id"]
-        return guard(core.upsert_position, c, b["company_id"], b["stage"], b["tier"], b.get("thesis"),
-                     b.get("invalidation"), b.get("target_price"), b.get("stop_price"), b.get("position_pct"),
-                     b.get("idea_source"), b.get("tags"), b.get("thesis_status"))
+        p = guard(core.upsert_position, c, b["company_id"], b["stage"], b["tier"], b.get("thesis"),
+                  b.get("invalidation"), b.get("target_price"), b.get("stop_price"), b.get("position_pct"),
+                  b.get("idea_source"), b.get("tags"), b.get("thesis_status"), b.get("target_basis"),
+                  b.get("model_url"))
+        if b.get("template"):
+            guard(core.apply_template, c, p["id"], b["template"])
+            p = core.get_position(c, p["id"])
+        return p
 
 
 @app.post("/api/positions/{pid}/interactions")
@@ -85,7 +91,103 @@ async def add_interaction(pid: int, req: Request):
     b = await body(req)
     with conn() as c:
         return guard(core.add_interaction, c, pid, b["kind"], b["content"], b.get("price"),
-                     b.get("behavior_tags"), b.get("source_url"), "user", b.get("ts"))
+                     b.get("behavior_tags"), b.get("source_url"), "user", b.get("ts"),
+                     b.get("driver_id"), b.get("checkpoint_id"), b.get("effect"))
+
+
+# ---- drivers / checkpoints / metrics / health
+@app.get("/api/positions/{pid}/health")
+def health(pid: int):
+    with conn() as c:
+        return guard(core.thesis_health, c, pid)
+
+
+@app.post("/api/positions/{pid}/drivers")
+async def add_driver(pid: int, req: Request):
+    b = await body(req)
+    with conn() as c:
+        return guard(core.add_driver, c, pid, b["name"], b.get("unit"), b.get("critical", 1),
+                     b.get("sensitivity"), b.get("notes"), b.get("higher_is_better", 1))
+
+
+@app.patch("/api/drivers/{did}")
+async def update_driver(did: int, req: Request):
+    b = await body(req)
+    with conn() as c:
+        return guard(core.update_driver, c, did, **b)
+
+
+@app.delete("/api/drivers/{did}")
+def delete_driver(did: int):
+    with conn() as c:
+        core.delete_driver(c, did)
+        return {"ok": True}
+
+
+@app.post("/api/drivers/{did}/values")
+async def set_driver_value(did: int, req: Request):
+    b = await body(req)
+    with conn() as c:
+        return guard(core.set_driver_value, c, did, b["period"], b["kind"], b["value"], b.get("source"))
+
+
+@app.get("/api/checkpoints")
+def checkpoints(status: str | None = None):
+    with conn() as c:
+        return guard(core.list_checkpoints, c, None, status)
+
+
+@app.post("/api/positions/{pid}/checkpoints")
+async def add_checkpoint(pid: int, req: Request):
+    b = await body(req)
+    with conn() as c:
+        return guard(core.add_checkpoint, c, pid, b["title"], b["expected_by"], b.get("evidence_needed"),
+                     b.get("driver_id"))
+
+
+@app.post("/api/checkpoints/{cid}/resolve")
+async def resolve_checkpoint(cid: int, req: Request):
+    b = await body(req)
+    with conn() as c:
+        return guard(core.resolve_checkpoint, c, cid, b["status"], b.get("evidence"))
+
+
+@app.delete("/api/checkpoints/{cid}")
+def delete_checkpoint(cid: int):
+    with conn() as c:
+        core.delete_checkpoint(c, cid)
+        return {"ok": True}
+
+
+@app.get("/api/metrics/{cid}")
+def metrics(cid: str):
+    with conn() as c:
+        return core.metric_comparison(c, cid)
+
+
+@app.post("/api/metrics/{cid}")
+async def set_metric(cid: str, req: Request):
+    b = await body(req)
+    with conn() as c:
+        return guard(core.set_metric, c, cid, b["metric"], b["period"], b["kind"], b["value"], b.get("source"))
+
+
+@app.get("/api/templates")
+def templates():
+    return core.list_templates()
+
+
+@app.post("/api/positions/{pid}/template")
+async def apply_template(pid: int, req: Request):
+    b = await body(req)
+    with conn() as c:
+        return guard(core.apply_template, c, pid, b["template"])
+
+
+@app.post("/api/checks/apply")
+def apply_checks():
+    with conn() as c:
+        return core.apply_health_flags(c)
 
 
 @app.post("/api/positions/{pid}/thesis_status")
@@ -133,7 +235,8 @@ async def add_edge(req: Request):
     b = await body(req)
     with conn() as c:
         return guard(core.add_edge, c, b["customer_id"], b["supplier_id"], b.get("revenue_share"),
-                     b.get("lag_days"), b.get("confidence", "medium"), b.get("source"), b.get("notes"))
+                     b.get("lag_days"), b.get("confidence", "medium"), b.get("source"), b.get("notes"),
+                     "user", b.get("relation", "customer"))
 
 
 @app.delete("/api/edges/{eid}")
@@ -204,7 +307,8 @@ def reminder_done(rid: int):
 # ---- static
 @app.get("/")
 def index():
-    return FileResponse(WEB / "index.html")
+    # The page is tiny; never let the browser cache it so asset version bumps take effect.
+    return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 app.mount("/static", StaticFiles(directory=WEB), name="static")

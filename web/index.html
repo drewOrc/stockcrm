@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stock CRM</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=0.2">
 </head>
 <body>
 <header>
@@ -26,7 +26,7 @@
   <section id="tab-graph" class="tab">
     <div class="graph-toolbar">
       <span class="legend"><i class="sw core"></i>核心 <i class="sw satellite"></i>衛星 <i class="sw watch"></i>觀察 <i class="sw blacklist"></i>黑名單 <i class="sw none"></i>無卡片</span>
-      <span class="hint">線寬 = 客戶佔供應商營收比重。點節點看卡片。</span>
+      <span class="hint">線寬 = 客戶佔供應商營收比重，橘線 = 夥伴關係。點節點看卡片。</span>
       <button id="btn-edge" class="ghost">＋ 新增關係</button>
     </div>
     <div id="graph" class="graph"></div>
@@ -65,15 +65,17 @@
     <label>投資論點<textarea name="thesis" rows="3"></textarea></label>
     <label>失效條件<textarea name="invalidation" rows="2"></textarea></label>
     <label>想法來源<input name="idea_source" placeholder="self / 朋友 / 券商報告"></label>
+    <label>論點模板（預填驅動因子與檢查點，可之後再改）<select name="template"><option value="">不套用</option></select></label>
     <menu><button value="cancel" class="ghost">取消</button><button value="ok" class="primary">建立</button></menu>
   </form>
 </dialog>
 
 <dialog id="dlg-edge">
   <form method="dialog" id="form-edge">
-    <h3>新增關係（客戶 → 供應商）</h3>
-    <label>客戶<select name="customer_id" id="sel-customer"></select></label>
-    <label>供應商<select name="supplier_id" id="sel-supplier"></select></label>
+    <h3>新增關係</h3>
+    <label>關係類型<select name="relation"><option value="customer">客戶 → 供應商（客戶向供應商採購）</option><option value="partner">夥伴 → 我方（產能或授權夥伴）</option></select></label>
+    <label>客戶 / 夥伴<select name="customer_id" id="sel-customer"></select></label>
+    <label>供應商 / 我方<select name="supplier_id" id="sel-supplier"></select></label>
     <div class="row">
       <label>佔供應商營收 %<input name="revenue_share" type="number" min="0" max="100" step="1" placeholder="25"></label>
       <label>時間差（天）<input name="lag_days" type="number" min="0" placeholder="60"></label>
@@ -86,6 +88,6 @@
   </form>
 </dialog>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=0.2"></script>
 </body>
 </html>

@@ -25,12 +25,24 @@ real customer -> supplier relationships with the customer's share of the supplie
 Positions are the user's cards (stage watch/hold/exited, tier core/satellite/watch/blacklist),
 each with a thesis and an invalidation condition. Interactions are the contact log.
 
+Every thesis can be made testable with three generic containers:
+- drivers: 1-3 quantitative assumptions (model value vs actual value per period, e.g. "出貨台數 2027 model 80").
+- checkpoints: "by <date> we should see <evidence>". Overdue pending checkpoints shake the thesis.
+- metrics: standard financials (revenue_m, revenue_q, gross_margin, opex, eps, shares), model vs actual.
+  Monthly revenue actuals are compared with the model's quarterly revenue as a run-rate.
+get_thesis_health summarises all three; get_morning_context lists positions needing attention.
+
 Rules:
-- Use log_interaction / add_to_watchlist / add_reminder ONLY for what the user explicitly asked to record.
-- Anything you infer from external information (news, filings, transcripts) goes through propose_*;
-  the user approves it in the web UI. Never change a thesis or position size yourself.
+- Use log_interaction / add_to_watchlist / add_reminder / add_driver / add_checkpoint / set_driver_value /
+  set_metric ONLY for what the user explicitly asked to record or dictated (e.g. model values from their spreadsheet).
+- Anything you infer from external information (news, filings, transcripts, monthly revenue releases) goes
+  through propose_*; the user approves it in the web UI. Never change a thesis or position size yourself.
+- When you log or propose an interaction that bears on a driver or checkpoint, link it (driver_id /
+  checkpoint_id) and set effect: supports | weakens | confirms. That is how evidence accumulates.
 - Company ids are MARKET:TICKER, e.g. TW:2330, US:NVDA. Most tools also accept a bare ticker or name.
 - revenue_share is a 0..1 fraction of the SUPPLIER's revenue coming from the CUSTOMER.
+- Periods: "2026" (year), "2026Q2" (quarter), "2026-05" (month). Revenue/opex in thousands of local currency,
+  gross_margin as 0..1, shares in thousands.
 - Times are UTC. Free text is Markdown. Reply to the user in their language (usually 繁體中文).
 """
 
@@ -163,14 +175,17 @@ def list_reminders() -> str:
 @server.tool()
 def log_interaction(position: str, kind: str, content: str, price: float | None = None,
                     behavior_tags: list[str] | None = None, source_url: str | None = None,
-                    ts: str | None = None) -> str:
+                    ts: str | None = None, driver_id: int | None = None, checkpoint_id: int | None = None,
+                    effect: str | None = None) -> str:
     """Record something the USER told you: a trade or a thought. kind: buy|sell|add|trim|thought|review
     (news|earnings|call also allowed when the user dictates it). behavior_tags examples:
     chasing, averaging_down, revenge, fomo, panic. ts: 'YYYY-MM-DD HH:MM:SS' UTC, default now.
-    For information you found yourself, use propose_interaction instead."""
+    Link to a driver or checkpoint with effect supports|weakens|confirms when relevant
+    (confirms on a checkpoint marks it confirmed). For information you found yourself, use propose_interaction."""
     with _conn() as c:
         return _j(core.add_interaction(c, _pos_id(c, position), kind, content, price, behavior_tags,
-                                       source_url, created_by=AGENT, ts=ts))
+                                       source_url, created_by=AGENT, ts=ts, driver_id=driver_id,
+                                       checkpoint_id=checkpoint_id, effect=effect))
 
 
 @server.tool()
@@ -209,28 +224,178 @@ def add_reminder(due_date: str, kind: str, content: str, position: str | None = 
 
 @server.tool()
 def propose_interaction(position: str, kind: str, content: str, rationale: str,
-                        source_url: str | None = None, price: float | None = None) -> str:
+                        source_url: str | None = None, price: float | None = None,
+                        driver_id: int | None = None, checkpoint_id: int | None = None,
+                        effect: str | None = None) -> str:
     """Propose adding an interaction based on information YOU found (news, filing, transcript).
     kind usually news|earnings|call. rationale: why it matters for this position's thesis.
+    Link it to the driver or checkpoint it bears on, with effect supports|weakens|confirms.
     The user approves it in the UI."""
     with _conn() as c:
         payload = {"position_id": _pos_id(c, position), "kind": kind, "content": content,
-                   "source_url": source_url, "price": price}
+                   "source_url": source_url, "price": price, "driver_id": driver_id,
+                   "checkpoint_id": checkpoint_id, "effect": effect}
         return _j(core.create_proposal(c, "interaction", payload, rationale, AGENT))
 
 
 @server.tool()
 def propose_edge(customer: str, supplier: str, rationale: str, revenue_share: float | None = None,
-                 lag_days: int | None = None, confidence: str = "medium", source: str | None = None) -> str:
-    """Propose a new or updated supply-chain edge: customer buys from supplier. revenue_share is the
-    fraction (0..1) of the SUPPLIER's revenue from this customer. confidence: high|medium|low.
-    Both companies must exist (use upsert_company first)."""
+                 lag_days: int | None = None, confidence: str = "medium", source: str | None = None,
+                 relation: str = "customer") -> str:
+    """Propose a new or updated edge. relation=customer: customer buys from supplier; revenue_share is the
+    fraction (0..1) of the SUPPLIER's revenue from this customer. relation=partner: capacity or licensing
+    partner (put the partner as customer, our company as supplier; revenue_share = share of our revenue
+    that depends on the partner). confidence: high|medium|low. Both companies must exist."""
     with _conn() as c:
         payload = {"customer_id": core.resolve_company(c, customer)["id"],
                    "supplier_id": core.resolve_company(c, supplier)["id"],
                    "revenue_share": revenue_share, "lag_days": lag_days,
-                   "confidence": confidence, "source": source}
+                   "confidence": confidence, "source": source, "relation": relation}
         return _j(core.create_proposal(c, "edge", payload, rationale, AGENT))
+
+
+# ------------------------------------------------------------------ drivers / checkpoints / metrics
+
+@server.tool()
+def get_thesis_health(position: str) -> str:
+    """Is this thesis still on track? Returns drivers (model vs actual, signal), checkpoints (overdue?),
+    metric comparisons and run-rate, and a list of issues with severity. suggest_shaken=true means
+    a high-severity issue exists on an intact thesis; tell the user, do not change status yourself."""
+    with _conn() as c:
+        p = core.get_position(c, position)
+        if not p:
+            return f"no position card for {position!r}"
+        return _j({"company_id": p["company_id"], "name": p["company"]["name"], "thesis_status": p["thesis_status"],
+                   "health": p["health"], "drivers": p["drivers"], "checkpoints": p["checkpoints"],
+                   "metrics": p["metrics"]})
+
+
+@server.tool()
+def list_drivers(position: str) -> str:
+    """Drivers (key quantitative assumptions) of a position with their model/actual series and signal
+    (no_data|on_track|ahead|behind|weakened). Use the driver id when linking interactions."""
+    with _conn() as c:
+        return _j(core.list_drivers(c, _pos_id(c, position)))
+
+
+@server.tool()
+def add_driver(position: str, name: str, unit: str | None = None, critical: bool = True,
+               sensitivity: str | None = None, higher_is_better: bool = True, notes: str | None = None) -> str:
+    """Add a driver the USER asked for (e.g. '幫台積電加一個 CoWoS 月產能的驅動因子'). critical drivers
+    shake the thesis when weakened or behind model. For drivers you think should exist, use propose_driver."""
+    with _conn() as c:
+        return _j(core.add_driver(c, _pos_id(c, position), name, unit, int(critical), sensitivity, notes,
+                                  int(higher_is_better), created_by=AGENT))
+
+
+@server.tool()
+def set_driver_value(driver_id: int, period: str, kind: str, value: float, source: str | None = None) -> str:
+    """Record a driver value the USER dictated, typically model values from their spreadsheet.
+    kind: model|actual. period: 2026 | 2026Q2 | 2026-05. For actuals you found in filings or news,
+    use propose_driver_value instead."""
+    with _conn() as c:
+        return _j(core.set_driver_value(c, driver_id, period, kind, value, source, created_by=AGENT))
+
+
+@server.tool()
+def list_checkpoints(position: str | None = None, status: str | None = None) -> str:
+    """Checkpoints: dated expected evidence. status: pending|confirmed|missed. Omit position for all.
+    Each row has overdue (bool) and days_left."""
+    with _conn() as c:
+        pid = _pos_id(c, position) if position else None
+        return _j(core.list_checkpoints(c, pid, status))
+
+
+@server.tool()
+def add_checkpoint(position: str, title: str, expected_by: str, evidence_needed: str | None = None,
+                   driver_id: int | None = None) -> str:
+    """Add a checkpoint the USER asked for. expected_by YYYY-MM-DD. For checkpoints you infer a thesis
+    needs (e.g. from a company's own roadmap), use propose_checkpoint."""
+    with _conn() as c:
+        return _j(core.add_checkpoint(c, _pos_id(c, position), title, expected_by, evidence_needed, driver_id,
+                                      created_by=AGENT))
+
+
+@server.tool()
+def set_metric(company: str, metric: str, period: str, kind: str, value: float, source: str | None = None) -> str:
+    """Record a standard metric the USER dictated (usually model values). metric: revenue_m|revenue_q|
+    gross_margin|opex|eps|shares. kind: model|actual. revenue_m needs a month period (2026-05); the others
+    a quarter (2026Q2) or year. Revenue/opex in thousands, gross_margin 0..1, shares in thousands.
+    For actuals you fetched (monthly revenue release, quarterly report) use propose_metric."""
+    with _conn() as c:
+        return _j(core.set_metric(c, core.resolve_company(c, company)["id"], metric, period, kind, value, source,
+                                  created_by=AGENT))
+
+
+@server.tool()
+def get_metric_comparison(company: str) -> str:
+    """Model vs actual for every standard metric, quarter run-rate from monthly revenue, and monthly YoY."""
+    with _conn() as c:
+        return _j(core.metric_comparison(c, core.resolve_company(c, company)["id"]))
+
+
+@server.tool()
+def list_templates() -> str:
+    """Thesis templates (transformation|growth|cyclical|supply_chain) that pre-fill drivers and checkpoints."""
+    return _j(core.list_templates())
+
+
+@server.tool()
+def apply_template(position: str, template: str) -> str:
+    """Apply a thesis template to a position when the USER asks. Creates its drivers and checkpoints
+    (checkpoint dates are offsets from today; tell the user to adjust them)."""
+    with _conn() as c:
+        return _j(core.apply_template(c, _pos_id(c, position), template, created_by=AGENT))
+
+
+@server.tool()
+def propose_driver(position: str, name: str, rationale: str, unit: str | None = None, critical: bool = True,
+                   sensitivity: str | None = None, higher_is_better: bool = True) -> str:
+    """Propose a driver the thesis should track (e.g. after reading a call transcript)."""
+    with _conn() as c:
+        payload = {"position_id": _pos_id(c, position), "name": name, "unit": unit, "critical": int(critical),
+                   "sensitivity": sensitivity, "higher_is_better": int(higher_is_better)}
+        return _j(core.create_proposal(c, "driver", payload, rationale, AGENT))
+
+
+@server.tool()
+def propose_driver_value(driver_id: int, period: str, value: float, rationale: str, source: str | None = None,
+                         kind: str = "actual") -> str:
+    """Propose an actual (or revised model) value for a driver from information you found.
+    Say where it came from in source and why it matters in rationale."""
+    with _conn() as c:
+        payload = {"driver_id": driver_id, "period": period, "kind": kind, "value": value, "source": source}
+        return _j(core.create_proposal(c, "driver_value", payload, rationale, AGENT))
+
+
+@server.tool()
+def propose_checkpoint(position: str, title: str, expected_by: str, rationale: str,
+                       evidence_needed: str | None = None, driver_id: int | None = None) -> str:
+    """Propose a checkpoint the thesis implicitly depends on (a milestone the company or a partner
+    announced, a date by which a driver must show up in results)."""
+    with _conn() as c:
+        payload = {"position_id": _pos_id(c, position), "title": title, "expected_by": expected_by,
+                   "evidence_needed": evidence_needed, "driver_id": driver_id}
+        return _j(core.create_proposal(c, "checkpoint", payload, rationale, AGENT))
+
+
+@server.tool()
+def propose_checkpoint_resolution(checkpoint_id: int, status: str, rationale: str, evidence: str | None = None) -> str:
+    """Propose marking a checkpoint confirmed or missed based on evidence you found. status: confirmed|missed."""
+    with _conn() as c:
+        payload = {"checkpoint_id": checkpoint_id, "status": status, "evidence": evidence}
+        return _j(core.create_proposal(c, "checkpoint_resolve", payload, rationale, AGENT))
+
+
+@server.tool()
+def propose_metric(company: str, metric: str, period: str, value: float, rationale: str,
+                   source: str | None = None, kind: str = "actual") -> str:
+    """Propose an actual metric you fetched (monthly revenue release, quarterly report).
+    metric: revenue_m|revenue_q|gross_margin|opex|eps|shares. Units as in set_metric."""
+    with _conn() as c:
+        payload = {"company_id": core.resolve_company(c, company)["id"], "metric": metric, "period": period,
+                   "kind": kind, "value": value, "source": source}
+        return _j(core.create_proposal(c, "metric", payload, rationale, AGENT))
 
 
 @server.tool()
