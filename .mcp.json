@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "stockcrm": {
+      "command": "python",
+      "args": ["-m", "stockcrm.mcp_server"],
+      "env": { "PYTHONIOENCODING": "utf-8" }
+    }
+  }
+}

@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+# 資料庫是個人持倉與交易紀錄，不進版本控制。示範資料：python seed.py --reset
+data/
+.claude/settings.local.json

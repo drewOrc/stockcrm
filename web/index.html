@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stock CRM</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">Stock CRM <span class="sub">供應鏈投資日誌</span></div>
+  <nav>
+    <button data-tab="board" class="active">看板</button>
+    <button data-tab="graph">關係圖</button>
+    <button data-tab="morning">早晨</button>
+    <button data-tab="proposals">提案 <span id="proposal-count" class="pill"></span></button>
+  </nav>
+  <button id="btn-new" class="primary">＋ 新卡片</button>
+</header>
+
+<main>
+  <section id="tab-board" class="tab active">
+    <div class="board" id="board"></div>
+  </section>
+
+  <section id="tab-graph" class="tab">
+    <div class="graph-toolbar">
+      <span class="legend"><i class="sw core"></i>核心 <i class="sw satellite"></i>衛星 <i class="sw watch"></i>觀察 <i class="sw blacklist"></i>黑名單 <i class="sw none"></i>無卡片</span>
+      <span class="hint">線寬 = 客戶佔供應商營收比重。點節點看卡片。</span>
+      <button id="btn-edge" class="ghost">＋ 新增關係</button>
+    </div>
+    <div id="graph" class="graph"></div>
+    <div id="overlap" class="panel"></div>
+  </section>
+
+  <section id="tab-morning" class="tab">
+    <div id="morning"></div>
+  </section>
+
+  <section id="tab-proposals" class="tab">
+    <div class="graph-toolbar">
+      <label><input type="checkbox" id="show-history"> 顯示已處理</label>
+    </div>
+    <div id="proposals"></div>
+  </section>
+</main>
+
+<aside id="drawer" class="drawer">
+  <div class="drawer-inner" id="drawer-content"></div>
+</aside>
+<div id="backdrop" class="backdrop"></div>
+
+<dialog id="dlg-new">
+  <form method="dialog" id="form-new">
+    <h3>新卡片</h3>
+    <div class="row">
+      <label>市場<select name="market"><option>TW</option><option>US</option></select></label>
+      <label>代號<input name="ticker" required placeholder="2330"></label>
+    </div>
+    <label>名稱<input name="name" required placeholder="台積電"></label>
+    <div class="row">
+      <label>階段<select name="stage"><option value="watch">觀察</option><option value="hold">持有</option><option value="exited">已出場</option></select></label>
+      <label>分層<select name="tier"><option value="watch">觀察</option><option value="satellite">衛星</option><option value="core">核心</option><option value="blacklist">黑名單</option></select></label>
+    </div>
+    <label>投資論點<textarea name="thesis" rows="3"></textarea></label>
+    <label>失效條件<textarea name="invalidation" rows="2"></textarea></label>
+    <label>想法來源<input name="idea_source" placeholder="self / 朋友 / 券商報告"></label>
+    <menu><button value="cancel" class="ghost">取消</button><button value="ok" class="primary">建立</button></menu>
+  </form>
+</dialog>
+
+<dialog id="dlg-edge">
+  <form method="dialog" id="form-edge">
+    <h3>新增關係（客戶 → 供應商）</h3>
+    <label>客戶<select name="customer_id" id="sel-customer"></select></label>
+    <label>供應商<select name="supplier_id" id="sel-supplier"></select></label>
+    <div class="row">
+      <label>佔供應商營收 %<input name="revenue_share" type="number" min="0" max="100" step="1" placeholder="25"></label>
+      <label>時間差（天）<input name="lag_days" type="number" min="0" placeholder="60"></label>
+    </div>
+    <div class="row">
+      <label>信心<select name="confidence"><option value="high">高</option><option value="medium" selected>中</option><option value="low">低</option></select></label>
+      <label>來源<input name="source" placeholder="年報 / 法說 / 估計"></label>
+    </div>
+    <menu><button value="cancel" class="ghost">取消</button><button value="ok" class="primary">新增</button></menu>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

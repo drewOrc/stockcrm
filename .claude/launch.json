@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "stockcrm", "runtimeExecutable": "python", "runtimeArgs": ["-m", "stockcrm.api"], "port": 8765 }
+  ]
+}

@@ -1,0 +1,219 @@
+"""REST API + static web UI. Run: python -m stockcrm.api  (http://127.0.0.1:8765)
+
+The API is a thin wrapper over core.py; the MCP server wraps the same functions.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import uvicorn  # noqa: E402
+from fastapi import FastAPI, HTTPException, Request  # noqa: E402
+from fastapi.responses import FileResponse, PlainTextResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+
+from stockcrm import core, db  # noqa: E402
+
+WEB = Path(__file__).resolve().parent.parent / "web"
+app = FastAPI(title="Stock CRM", version="0.1")
+
+
+def conn():
+    return db.connect()
+
+
+def guard(fn, *a, **kw):
+    try:
+        return fn(*a, **kw)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+async def body(req: Request) -> dict[str, Any]:
+    try:
+        return await req.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON body")
+
+
+@app.get("/api/enums")
+def enums():
+    return {"stages": db.STAGES, "tiers": db.TIERS, "thesis_statuses": db.THESIS_STATUSES,
+            "interaction_kinds": db.INTERACTION_KINDS, "reminder_kinds": db.REMINDER_KINDS,
+            "confidences": db.CONFIDENCES, "markets": db.MARKETS}
+
+
+@app.get("/api/tier_rules")
+def tier_rules():
+    with conn() as c:
+        return core.export_graph(c)["tier_rules"]
+
+
+# ---- positions
+@app.get("/api/positions")
+def positions(stage: str | None = None, tier: str | None = None):
+    with conn() as c:
+        return guard(core.list_positions, c, stage, tier)
+
+
+@app.get("/api/positions/{ref}")
+def position(ref: str):
+    with conn() as c:
+        p = guard(core.get_position, c, ref)
+        if not p:
+            raise HTTPException(404, "no card")
+        return p
+
+
+@app.post("/api/positions")
+async def upsert_position(req: Request):
+    b = await body(req)
+    with conn() as c:
+        if b.get("market") and b.get("ticker") and b.get("name"):
+            comp = guard(core.upsert_company, c, b["market"], b["ticker"], b["name"], b.get("name_en"), b.get("sector"))
+            b["company_id"] = comp["id"]
+        return guard(core.upsert_position, c, b["company_id"], b["stage"], b["tier"], b.get("thesis"),
+                     b.get("invalidation"), b.get("target_price"), b.get("stop_price"), b.get("position_pct"),
+                     b.get("idea_source"), b.get("tags"), b.get("thesis_status"))
+
+
+@app.post("/api/positions/{pid}/interactions")
+async def add_interaction(pid: int, req: Request):
+    b = await body(req)
+    with conn() as c:
+        return guard(core.add_interaction, c, pid, b["kind"], b["content"], b.get("price"),
+                     b.get("behavior_tags"), b.get("source_url"), "user", b.get("ts"))
+
+
+@app.post("/api/positions/{pid}/thesis_status")
+async def thesis_status(pid: int, req: Request):
+    b = await body(req)
+    with conn() as c:
+        return guard(core.set_thesis_status, c, pid, b["status"])
+
+
+@app.get("/api/positions/{pid}/tier_check")
+def tier_check(pid: int, new_pct: float):
+    with conn() as c:
+        return guard(core.check_tier_limit, c, pid, new_pct)
+
+
+# ---- companies & graph
+@app.get("/api/companies")
+def companies(q: str = "", market: str | None = None):
+    with conn() as c:
+        return core.search_companies(c, q, market)
+
+
+@app.post("/api/companies")
+async def upsert_company(req: Request):
+    b = await body(req)
+    with conn() as c:
+        return guard(core.upsert_company, c, b["market"], b["ticker"], b["name"], b.get("name_en"),
+                     b.get("sector"), b.get("notes"))
+
+
+@app.get("/api/graph")
+def graph():
+    with conn() as c:
+        return core.export_graph(c)
+
+
+@app.get("/api/graph.md", response_class=PlainTextResponse)
+def graph_md():
+    with conn() as c:
+        return core.graph_markdown(c)
+
+
+@app.post("/api/edges")
+async def add_edge(req: Request):
+    b = await body(req)
+    with conn() as c:
+        return guard(core.add_edge, c, b["customer_id"], b["supplier_id"], b.get("revenue_share"),
+                     b.get("lag_days"), b.get("confidence", "medium"), b.get("source"), b.get("notes"))
+
+
+@app.delete("/api/edges/{eid}")
+def delete_edge(eid: int):
+    with conn() as c:
+        core.delete_edge(c, eid)
+        return {"ok": True}
+
+
+@app.get("/api/relations/{cid}")
+def relations(cid: str):
+    with conn() as c:
+        return core.relations(c, cid)
+
+
+@app.get("/api/exposure/{cid}")
+def exposure(cid: str):
+    with conn() as c:
+        return core.indirect_exposure(c, cid)
+
+
+@app.get("/api/overlap")
+def overlap():
+    with conn() as c:
+        return core.portfolio_overlap(c)
+
+
+@app.get("/api/morning")
+def morning():
+    with conn() as c:
+        return core.morning_context(c)
+
+
+# ---- proposals & reminders
+@app.get("/api/proposals")
+def proposals(status: str = "pending"):
+    with conn() as c:
+        return core.list_proposals(c, None if status == "all" else status)
+
+
+@app.post("/api/proposals/{pid}/decide")
+async def decide(pid: int, req: Request):
+    b = await body(req)
+    with conn() as c:
+        return guard(core.decide_proposal, c, pid, bool(b.get("approve")))
+
+
+@app.get("/api/reminders")
+def reminders():
+    with conn() as c:
+        return core.all_reminders(c)
+
+
+@app.post("/api/reminders")
+async def add_reminder(req: Request):
+    b = await body(req)
+    with conn() as c:
+        return guard(core.add_reminder, c, b["due_date"], b["kind"], b["content"], b.get("position_id"))
+
+
+@app.post("/api/reminders/{rid}/done")
+def reminder_done(rid: int):
+    with conn() as c:
+        core.complete_reminder(c, rid)
+        return {"ok": True}
+
+
+# ---- static
+@app.get("/")
+def index():
+    return FileResponse(WEB / "index.html")
+
+
+app.mount("/static", StaticFiles(directory=WEB), name="static")
+
+
+def main():
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
+    uvicorn.run("stockcrm.api:app", host="127.0.0.1", port=port, reload=False)
+
+
+if __name__ == "__main__":
+    main()
