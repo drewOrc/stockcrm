@@ -243,3 +243,15 @@ def test_migration_adds_columns_to_old_db(tmp_path):
     assert "relation" in {r[1] for r in c.execute("PRAGMA table_info(edges)")}
     c.execute("INSERT INTO proposals (kind, payload, rationale, created_by) VALUES ('metric', '{}', 'r', 'a')")
     assert c.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 2
+
+
+def test_rename_company_moves_references(conn):
+    core.set_metric(conn, "TW:2382", "revenue_m", "2026-09", "actual", 1)
+    c = core.rename_company(conn, "TW:2382", "TW", "4542", "科嶠")
+    assert c["id"] == "TW:4542" and c["name"] == "科嶠"
+    assert core.get_company(conn, "TW:2382") is None
+    assert core.get_position(conn, "TW:4542")["company_id"] == "TW:4542"
+    assert any(e["supplier_id"] == "TW:4542" for e in core.export_graph(conn)["edges"])
+    assert core.list_metrics(conn, "TW:4542", "revenue_m")[0]["value"] == 1
+    with pytest.raises(ValueError):
+        core.rename_company(conn, "TW:4542", "TW", "2330")

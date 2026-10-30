@@ -1266,3 +1266,30 @@ def quality_markdown(rep: dict) -> str:
             lines.append("- " + "，".join(f"{k}={v}" for k, v in it.items() if v is not None))
         lines.append("")
     return "\n".join(lines)
+
+
+def rename_company(conn, old_id: str, market: str, ticker: str, name: str | None = None) -> dict:
+    """Change a company's id (e.g. a placeholder ticker to the real one) across every table that
+    references it. Positions, edges, metrics and YTD financials follow; the old id disappears."""
+    _check(market, db.MARKETS, "market")
+    old = get_company(conn, old_id)
+    if not old:
+        raise ValueError(f"unknown company {old_id}")
+    new_id = company_id(market, ticker)
+    if new_id != old_id and get_company(conn, new_id):
+        raise ValueError(f"{new_id} already exists; merge by hand")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN")
+        conn.execute("UPDATE companies SET id=?, market=?, ticker=?, name=COALESCE(?, name) WHERE id=?",
+                     (new_id, market.upper(), ticker.upper(), name, old_id))
+        for table, col in (("positions", "company_id"), ("edges", "customer_id"), ("edges", "supplier_id"),
+                           ("metrics", "company_id"), ("financials_ytd", "company_id")):
+            conn.execute(f"UPDATE {table} SET {col}=? WHERE {col}=?", (new_id, old_id))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    return get_company(conn, new_id)
