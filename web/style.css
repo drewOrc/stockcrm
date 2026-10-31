@@ -138,3 +138,29 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
 dialog h3 { margin: 0 0 12px; }
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; margin: 8px 0 0; }
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 6px; font-size: 13px; z-index: 30; }
+
+/* drivers / checkpoints / metrics */
+.row4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 8px; }
+.row4 input, .row4 select { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font-size: 12px; }
+label.inline { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 12px; }
+label.inline input { width: auto; }
+.tiny-select { font-size: 12px; padding: 2px 6px; margin-left: 8px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; }
+table.drivers td { vertical-align: middle; }
+table.inner { margin: 6px 0; font-size: 12px; }
+table.inner th, table.inner td { padding: 3px 6px; }
+.series-row td { background: var(--bg); }
+.actions-cell { white-space: nowrap; text-align: right; }
+.sig { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; color: #fff; background: var(--none); }
+.sig.on_track { background: var(--ok); } .sig.ahead { background: var(--accent); }
+.sig.behind, .sig.weakened { background: var(--bad); } .sig.no_data { background: var(--watch); }
+.cp { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+.cp.overdue { background: color-mix(in srgb, var(--bad) 8%, transparent); border-radius: 6px; padding: 8px; }
+.pill-s { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 11px; color: #fff; background: var(--muted); margin-right: 4px; }
+.pill-s.pending { background: var(--muted); } .pill-s.confirmed { background: var(--ok); } .pill-s.missed, .pill-s.bad { background: var(--bad); }
+.pill-s.supports { background: var(--ok); } .pill-s.weakens { background: var(--bad); } .pill-s.confirms { background: var(--accent); }
+tr.flag td { color: var(--bad); }
+ul.issues { margin: 6px 0 0; padding-left: 18px; }
+ul.issues li.high { color: var(--bad); } ul.issues li.medium { color: var(--warn); } ul.issues li.low { color: var(--muted); }
+.att { padding: 8px 0; border-bottom: 1px dashed var(--line); }
+.att a, .panel a[data-open] { color: var(--accent); cursor: pointer; text-decoration: none; }
+.graph .edge.partner { stroke: var(--warn); stroke-opacity: .7; }
