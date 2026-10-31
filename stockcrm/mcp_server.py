@@ -435,7 +435,7 @@ def get_engine_summary(code: str) -> str:
     Returns '引擎離線' when the engine is not running."""
     import urllib.error
     import urllib.request
-    url = f"{ENGINE_URL}/api/stocks/{code}/summary"
+    url = f"{ENGINE_URL}/api/market/stocks/{code}/summary"
     # The engine requires a login; local services authenticate with the shared facade token instead.
     headers = {"Accept": "application/json", "X-User-Id": str(core.uid())}
     token = os.environ.get("STOCKCRM_FACADE_TOKEN") or os.environ.get("CRM_FACADE_TOKEN")
