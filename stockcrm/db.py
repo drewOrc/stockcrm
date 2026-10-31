@@ -33,6 +33,9 @@ ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.environ.get("STOCKCRM_DB", ROOT / "data" / "stockcrm.db"))
 
 MARKETS = ("TW", "US")
+ROLES = ("admin", "member")
+PROPOSAL_SCOPES = ("knowledge", "personal")
+KNOWLEDGE_PROPOSAL_KINDS = ("edge", "brief")   # metric proposals are knowledge when kind='actual'
 STAGES = ("watch", "hold", "exited")
 TIERS = ("core", "satellite", "watch", "blacklist")
 THESIS_STATUSES = ("intact", "shaken", "broken")
@@ -52,6 +55,21 @@ METRIC_LABELS = {"revenue_m": "月營收", "revenue_q": "季營收", "gross_marg
                  "opex": "營業費用", "eps": "EPS", "shares": "股數"}
 
 SCHEMA = """
+-- Personal-layer owner. id 1 is the administrator. Shared with the engine once the databases merge.
+CREATE TABLE IF NOT EXISTS users (
+  id            INTEGER PRIMARY KEY,
+  username      TEXT NOT NULL UNIQUE,
+  display_name  TEXT NOT NULL,
+  password_hash TEXT,                   -- managed by the engine's login; CRM never reads it
+  role          TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin','member')),
+  line_user_id  TEXT,
+  email         TEXT UNIQUE,
+  disabled      INTEGER NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  last_login_at TEXT
+);
+INSERT OR IGNORE INTO users (id, username, display_name, role) VALUES (1, 'drew', 'Drew', 'admin');
+
 CREATE TABLE IF NOT EXISTS companies (
   id        TEXT PRIMARY KEY,          -- "TW:2330", "US:NVDA"
   market    TEXT NOT NULL CHECK (market IN ('TW','US')),
@@ -84,7 +102,8 @@ CREATE TABLE IF NOT EXISTS edges (
 -- One card per company you track. This is the "account" in CRM terms.
 CREATE TABLE IF NOT EXISTS positions (
   id             INTEGER PRIMARY KEY,
-  company_id     TEXT NOT NULL UNIQUE REFERENCES companies(id),
+  user_id        INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
+  company_id     TEXT NOT NULL REFERENCES companies(id),
   stage          TEXT NOT NULL CHECK (stage IN ('watch','hold','exited')),
   tier           TEXT NOT NULL CHECK (tier IN ('core','satellite','watch','blacklist')),
   thesis         TEXT,                 -- markdown: why own it
@@ -100,7 +119,8 @@ CREATE TABLE IF NOT EXISTS positions (
   model_url      TEXT,                 -- link/path to the valuation spreadsheet, if any
   tags           TEXT NOT NULL DEFAULT '[]',
   created_at     TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (user_id, company_id)
 );
 
 -- Key quantitative assumptions behind a thesis. Content is per company; the container is generic.
@@ -179,6 +199,7 @@ CREATE TABLE IF NOT EXISTS interactions (
 
 CREATE TABLE IF NOT EXISTS reminders (
   id          INTEGER PRIMARY KEY,
+  user_id     INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
   position_id INTEGER REFERENCES positions(id) ON DELETE CASCADE,
   due_date    TEXT NOT NULL,
   kind        TEXT NOT NULL CHECK (kind IN ('price','earnings','revenue','review','other')),
@@ -189,8 +210,12 @@ CREATE TABLE IF NOT EXISTS reminders (
 );
 
 -- Agents write here. The user approves in the UI; approval applies the payload.
+-- scope: personal (the owner approves) | knowledge (edges, briefs, actual metrics: an admin approves).
 CREATE TABLE IF NOT EXISTS proposals (
   id          INTEGER PRIMARY KEY,
+  user_id     INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
+  scope       TEXT NOT NULL DEFAULT 'personal' CHECK (scope IN ('knowledge','personal')),
+  approver_user_id INTEGER REFERENCES users(id),
   kind        TEXT NOT NULL,
   payload     TEXT NOT NULL,
   rationale   TEXT NOT NULL,
@@ -242,17 +267,16 @@ CREATE TABLE IF NOT EXISTS maintenance_log (
   details TEXT                          -- JSON
 );
 
+-- Position-size discipline per tier, per user. max_pct is % of total portfolio.
 CREATE TABLE IF NOT EXISTS tier_rules (
-  tier     TEXT PRIMARY KEY CHECK (tier IN ('core','satellite','watch','blacklist')),
+  user_id  INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
+  tier     TEXT NOT NULL CHECK (tier IN ('core','satellite','watch','blacklist')),
   max_pct  REAL NOT NULL,
   label    TEXT NOT NULL,
-  description TEXT NOT NULL
+  description TEXT NOT NULL,
+  PRIMARY KEY (user_id, tier)
 );
-INSERT OR IGNORE INTO tier_rules VALUES
-  ('core',      15, '核心', '高信心、可重倉、長抱'),
-  ('satellite',  5, '衛星', '有論點但信心中等，部位有上限'),
-  ('watch',      0, '觀察', '尚未持有，等待條件成立'),
-  ('blacklist',  0, '黑名單', '踩過雷或已判定不碰，記下原因');
+
 
 CREATE INDEX IF NOT EXISTS idx_interactions_pos ON interactions(position_id, ts);
 CREATE INDEX IF NOT EXISTS idx_edges_customer ON edges(customer_id);
@@ -271,10 +295,79 @@ _MIGRATIONS = [
     ("interactions", "driver_id", "INTEGER REFERENCES drivers(id) ON DELETE SET NULL"),
     ("interactions", "checkpoint_id", "INTEGER REFERENCES checkpoints(id) ON DELETE SET NULL"),
     ("interactions", "effect", "TEXT"),
+    ("reminders", "user_id", "INTEGER NOT NULL DEFAULT 1 REFERENCES users(id)"),
+    ("proposals", "user_id", "INTEGER NOT NULL DEFAULT 1 REFERENCES users(id)"),
+    ("proposals", "scope", "TEXT NOT NULL DEFAULT 'personal'"),
+    ("proposals", "approver_user_id", "INTEGER REFERENCES users(id)"),
 ]
+
+TIER_DEFAULTS = (("core", 15, "核心", "高信心、可重倉、長抱"),
+                 ("satellite", 5, "衛星", "有論點但信心中等，部位有上限"),
+                 ("watch", 0, "觀察", "尚未持有，等待條件成立"),
+                 ("blacklist", 0, "黑名單", "踩過雷或已判定不碰，記下原因"))
+
+
+def _table_sql(conn, name: str) -> str:
+    r = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+    return r[0] if r else ""
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    # Table rebuilds below DROP and recreate tables that other tables reference. With foreign keys ON a DROP
+    # runs an implicit DELETE that fires ON DELETE actions (cascading into interactions, nulling
+    # checkpoints.interaction_id), so keys are switched off for the whole migration.
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        _migrate_inner(conn)
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _migrate_inner(conn: sqlite3.Connection) -> None:
+    conn.execute("INSERT OR IGNORE INTO users (id, username, display_name, role) VALUES (1, 'drew', 'Drew', 'admin')")
+    # positions: UNIQUE(company_id) -> UNIQUE(user_id, company_id). Referenced by drivers/checkpoints/interactions/
+    # reminders, so build the replacement first, drop the old table, then rename (renaming first would drag the
+    # foreign keys along).
+    psql = _table_sql(conn, "positions")
+    if psql and "user_id" not in psql:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(positions)")}
+        keep = [c for c in ("id", "company_id", "stage", "tier", "thesis", "invalidation", "thesis_status", "target_price",
+                            "target_basis", "stop_price", "position_pct", "idea_source", "model_url", "tags", "shares",
+                            "avg_cost", "created_at", "updated_at") if c in cols]
+        collist = ", ".join(keep)
+        sel = ", ".join(f"COALESCE({c}, datetime('now'))" if c in ("created_at", "updated_at") else c for c in keep)
+        conn.executescript(f"""
+            CREATE TABLE positions_new (
+              id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
+              company_id TEXT NOT NULL REFERENCES companies(id),
+              stage TEXT NOT NULL CHECK (stage IN ('watch','hold','exited')),
+              tier TEXT NOT NULL CHECK (tier IN ('core','satellite','watch','blacklist')),
+              thesis TEXT, invalidation TEXT,
+              thesis_status TEXT NOT NULL DEFAULT 'intact' CHECK (thesis_status IN ('intact','shaken','broken')),
+              target_price REAL, target_basis TEXT, stop_price REAL, position_pct REAL NOT NULL DEFAULT 0,
+              idea_source TEXT, model_url TEXT, tags TEXT NOT NULL DEFAULT '[]', shares INTEGER, avg_cost REAL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+              UNIQUE (user_id, company_id));
+            INSERT INTO positions_new ({collist}) SELECT {sel} FROM positions;
+            DROP TABLE positions;
+            ALTER TABLE positions_new RENAME TO positions;
+        """)
+    # tier_rules: PRIMARY KEY (tier) -> (user_id, tier)
+    tsql = _table_sql(conn, "tier_rules")
+    if tsql and "user_id" not in tsql:
+        conn.executescript("""
+            CREATE TABLE tier_rules_new (
+              user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
+              tier TEXT NOT NULL CHECK (tier IN ('core','satellite','watch','blacklist')),
+              max_pct REAL NOT NULL, label TEXT NOT NULL, description TEXT NOT NULL, PRIMARY KEY (user_id, tier));
+            INSERT INTO tier_rules_new (user_id, tier, max_pct, label, description)
+              SELECT 1, tier, max_pct, label, description FROM tier_rules;
+            DROP TABLE tier_rules;
+            ALTER TABLE tier_rules_new RENAME TO tier_rules;
+        """)
+    for tier, max_pct, label, desc in TIER_DEFAULTS:
+        conn.execute("INSERT OR IGNORE INTO tier_rules (user_id, tier, max_pct, label, description) VALUES (1,?,?,?,?)",
+                     (tier, max_pct, label, desc))
     for table, col, ddl in _MIGRATIONS:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
@@ -328,11 +421,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.executescript("""
             ALTER TABLE proposals RENAME TO proposals_old;
             CREATE TABLE proposals (
-              id INTEGER PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, rationale TEXT NOT NULL,
-              created_by TEXT NOT NULL,
+              id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
+              scope TEXT NOT NULL DEFAULT 'personal' CHECK (scope IN ('knowledge','personal')),
+              approver_user_id INTEGER REFERENCES users(id),
+              kind TEXT NOT NULL, payload TEXT NOT NULL, rationale TEXT NOT NULL, created_by TEXT NOT NULL,
               status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
               created_at TEXT NOT NULL DEFAULT (datetime('now')), decided_at TEXT, applied_ref TEXT);
-            INSERT INTO proposals SELECT * FROM proposals_old;
+            INSERT INTO proposals (id, user_id, scope, approver_user_id, kind, payload, rationale, created_by, status,
+                                   created_at, decided_at, applied_ref)
+              SELECT id, user_id, scope, approver_user_id, kind, payload, rationale, created_by, status, created_at,
+                     decided_at, applied_ref FROM proposals_old;
             DROP TABLE proposals_old;
         """)
     conn.commit()

@@ -8,6 +8,7 @@ Tool naming convention:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,8 +18,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 
 from stockcrm import core, db  # noqa: E402
+from stockcrm.env import load_dotenv  # noqa: E402
 
+load_dotenv()
 AGENT = "agent:claude-code"
+# Which user's personal layer this MCP server acts on (the facade is not involved here).
+core.set_current_user(int(os.environ.get("STOCKCRM_USER_ID", "1")))
 
 INSTRUCTIONS = """Stock CRM: a supply-chain-aware investment journal. Companies are nodes; edges are
 real customer -> supplier relationships with the customer's share of the supplier's revenue.
@@ -431,8 +436,14 @@ def get_engine_summary(code: str) -> str:
     import urllib.error
     import urllib.request
     url = f"{ENGINE_URL}/api/stocks/{code}/summary"
+    # The engine requires a login; local services authenticate with the shared facade token instead.
+    headers = {"Accept": "application/json", "X-User-Id": str(core.uid())}
+    token = os.environ.get("STOCKCRM_FACADE_TOKEN") or os.environ.get("CRM_FACADE_TOKEN")
+    if token:
+        headers["X-Service-Token"] = token
+        headers["X-Facade-Token"] = token
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept": "application/json"}), timeout=15) as r:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as r:
             return r.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         return f"engine returned {e.code} for {url}"

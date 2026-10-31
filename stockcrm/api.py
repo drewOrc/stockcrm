@@ -18,7 +18,49 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from stockcrm import core, db  # noqa: E402
 
 WEB = Path(__file__).resolve().parent.parent / "web"
-app = FastAPI(title="Stock CRM", version="0.1")
+app = FastAPI(title="Stock CRM", version="0.2")
+
+# Identity comes from the facade (twstock-tracker) as headers; 8765 itself only listens on loopback.
+#   X-User-Id      integer users.id
+#   X-Facade-Token shared secret, env STOCKCRM_FACADE_TOKEN (CRM_FACADE_TOKEN also accepted)
+# STOCKCRM_MULTIUSER=1 switches to fail-closed: API requests without a valid identity get 401.
+# Until then unauthenticated requests act as user 1 (single-user mode, as before).
+import os as _os  # noqa: E402
+
+from fastapi.responses import JSONResponse  # noqa: E402
+
+from stockcrm.env import load_dotenv  # noqa: E402
+
+load_dotenv()
+FACADE_TOKEN = _os.environ.get("STOCKCRM_FACADE_TOKEN") or _os.environ.get("CRM_FACADE_TOKEN")
+MULTIUSER = _os.environ.get("STOCKCRM_MULTIUSER", "0") == "1"
+
+
+def _identity_from_headers(req: Request) -> int | None:
+    token = req.headers.get("x-facade-token")
+    user = req.headers.get("x-user-id")
+    if not user or not user.isdigit():
+        return None
+    if FACADE_TOKEN and token != FACADE_TOKEN:
+        return None
+    if not FACADE_TOKEN and MULTIUSER:
+        return None  # multi-user mode without a configured token: never trust the header
+    return int(user)
+
+
+@app.middleware("http")
+async def user_context(req: Request, call_next):
+    user_id = _identity_from_headers(req)
+    if user_id is None:
+        if MULTIUSER and req.url.path.startswith("/api/"):
+            return JSONResponse({"detail": "identity required: use the unified UI on the engine (http://127.0.0.1:8000); "
+                                           "direct calls need X-User-Id + X-Facade-Token"}, status_code=401)
+        user_id = 1
+    token = core.CURRENT_USER.set(user_id)
+    try:
+        return await call_next(req)
+    finally:
+        core.CURRENT_USER.reset(token)
 
 
 def conn():
@@ -37,6 +79,33 @@ async def body(req: Request) -> dict[str, Any]:
         return await req.json()
     except Exception:
         raise HTTPException(400, "invalid JSON body")
+
+
+@app.get("/api/me")
+def me():
+    with conn() as c:
+        u = core.get_user(c)
+        if not u:
+            raise HTTPException(401, "unknown user")
+        return {**u, "multiuser": MULTIUSER}
+
+
+@app.get("/api/users")
+def users():
+    with conn() as c:
+        if not core.is_admin(c):
+            raise HTTPException(403, "admin only")
+        return core.list_users(c)
+
+
+@app.post("/api/users")
+async def create_user(req: Request):
+    b = await body(req)
+    with conn() as c:
+        if not core.is_admin(c):
+            raise HTTPException(403, "admin only")
+        return guard(core.create_user, c, b["username"], b.get("display_name") or b["username"], b.get("email"),
+                     b.get("role", "member"), b.get("line_user_id"))
 
 
 @app.get("/api/enums")
