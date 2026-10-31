@@ -1,11 +1,10 @@
 """Maintenance entry point. Run from anywhere:
 
-    python scripts/maintain.py all            # backup -> fetch monthly/quarterly/shares -> quality report
+    python scripts/maintain.py all            # backup -> quality report -> health
     python scripts/maintain.py backup
-    python scripts/maintain.py fetch-monthly
-    python scripts/maintain.py fetch-quarterly
-    python scripts/maintain.py fetch-shares
     python scripts/maintain.py quality
+Official data (monthly revenue, quarterly YTD, shares) is fetched by the twstock-tracker engine into the shared
+knowledge_* tables (its jobs mops_monthly / mops_quarterly / mops_shares, see job_runs).
     python scripts/maintain.py health         # list positions whose thesis health suggests attention (no changes)
     python scripts/maintain.py reset          # DANGER: back up, then delete all data rows (keeps tier_rules and the log)
 
@@ -27,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 from stockcrm.env import load_dotenv  # noqa: E402
 
 load_dotenv()
-from stockcrm import core, db, mops  # noqa: E402
+from stockcrm import core, db  # noqa: E402
 
 REPORTS = db.DB_PATH.parent / "reports"
 
@@ -35,23 +34,6 @@ REPORTS = db.DB_PATH.parent / "reports"
 def job_backup(conn):
     r = core.backup_db(conn)
     return f"備份到 {pathlib.Path(r['path']).name}，保留 {r['kept']} 份，刪除 {len(r['pruned'])} 份", r
-
-
-def job_fetch_monthly(conn):
-    r = mops.apply_monthly(conn, mops.fetch_monthly())
-    n = len(r["written"])
-    missing = f"，API 沒有：{'、'.join(r['missing'])}" if r["missing"] else ""
-    return f"月營收寫入 {n} 家，最新期間 {r['latest_period']}{missing}", r
-
-
-def job_fetch_quarterly(conn):
-    r = mops.apply_quarterly(conn, mops.fetch_quarterly())
-    return f"季報 YTD 存 {len(r['stored'])} 家，推出單季指標 {len(r['derived'])} 家，{len(r['skipped'])} 家缺前一季", r
-
-
-def job_fetch_shares(conn):
-    r = mops.apply_shares(conn, mops.fetch_shares())
-    return f"股數寫入 {len(r['written'])} 家" + (f"，錯誤 {len(r['errors'])}" if r["errors"] else ""), r
 
 
 def job_quality(conn):
@@ -87,14 +69,11 @@ def job_health(conn):
 
 JOBS = {
     "backup": ("backup", job_backup),
-    "fetch-monthly": ("fetch_monthly", job_fetch_monthly),
-    "fetch-quarterly": ("fetch_quarterly", job_fetch_quarterly),
-    "fetch-shares": ("fetch_shares", job_fetch_shares),
     "quality": ("quality", job_quality),
     "health": ("health", job_health),
     "reset": ("reset", job_reset),      # not part of `all`
 }
-ALL = ["backup", "fetch-monthly", "fetch-quarterly", "fetch-shares", "quality", "health"]
+ALL = ["backup", "quality", "health"]
 
 
 def run(names: list[str], write_report: bool) -> int:
@@ -130,12 +109,6 @@ def run(names: list[str], write_report: bool) -> int:
                                  + ("，建議標為動搖" if h["suggest_shaken"] else ""))
                     lines += [f"- {m}" for m in h["issues"]]
                     lines.append("")
-            if name == "fetch-monthly" and details:
-                lines += ["", "# 月營收", ""]
-                for w in details["written"]:
-                    yoy = f"{w['yoy_pct']:+.1f}%" if w["yoy_pct"] is not None else "?"
-                    lines.append(f"- {w['company_id']} {w['period']}：{w['revenue']:,.0f} 千元，年增 {yoy}"
-                                 + (f"，備註：{w['remark']}" if w["remark"] else ""))
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         print(f"report: {path}")
     return 1 if failed else 0

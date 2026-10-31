@@ -326,8 +326,13 @@ $("#form-new").onsubmit = async (e) => {
 };
 
 /* ---------------- graph (layered left-to-right by supply depth) */
+let graphCache = null;
 async function loadGraph() {
-  const g = await api("/graph");
+  const full = graphCache || (graphCache = await api("/graph"));
+  const showHolding = $("#toggle-holding")?.checked;
+  // ETF constituent edges (relation=holding) are numerous; hide them unless asked, and hide nodes that only hang off them
+  const edges = full.edges.filter((e) => showHolding || e.relation !== "holding");
+  const g = { ...full, edges };
   const byId = Object.fromEntries(g.nodes.map((n) => [n.id, n]));
   const suppliersOf = {}, customersOf = {};
   g.edges.forEach((e) => { (suppliersOf[e.customer_id] ??= []).push(e); (customersOf[e.supplier_id] ??= []).push(e); });
@@ -341,6 +346,7 @@ async function loadGraph() {
     return depth[id];
   };
   const nodes = g.nodes.filter((n) => suppliersOf[n.id] || customersOf[n.id] || n.stage);
+  $("#graph-count").textContent = `${nodes.length} 節點 · ${g.edges.length} 條邊${showHolding ? "" : `（隱藏 ${full.edges.length - g.edges.length} 條成分股邊）`}`;
   nodes.forEach((n) => dep(n.id));
   const layers = {};
   nodes.forEach((n) => (layers[depth[n.id]] ??= []).push(n));
@@ -383,13 +389,14 @@ async function loadGraph() {
   $("#sel-customer").innerHTML = o; $("#sel-supplier").innerHTML = o;
 }
 $("#btn-edge").onclick = () => $("#dlg-edge").showModal();
+$("#toggle-holding").onchange = loadGraph;
 $("#form-edge").onsubmit = async (e) => {
   if (e.submitter?.value !== "ok") return;
   e.preventDefault(); const f = Object.fromEntries(new FormData(e.target));
   await api("/edges", { method: "POST", body: { customer_id: f.customer_id, supplier_id: f.supplier_id,
     revenue_share: f.revenue_share === "" ? null : +f.revenue_share / 100, lag_days: f.lag_days === "" ? null : +f.lag_days,
     confidence: f.confidence, source: f.source || null, relation: f.relation } });
-  $("#dlg-edge").close(); toast("關係已新增"); loadGraph();
+  $("#dlg-edge").close(); toast("關係已新增"); graphCache = null; loadGraph();
 };
 
 /* ---------------- morning */

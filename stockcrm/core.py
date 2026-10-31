@@ -13,7 +13,7 @@ import json
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
-from . import db
+from . import db, knowledge
 
 # ---------------------------------------------------------------- user context
 # The personal layer is scoped by user. The API sets this per request from the facade headers; the MCP
@@ -49,7 +49,7 @@ def is_admin(conn, user_id: int | None = None) -> bool:
 
 def ensure_tier_rules(conn, user_id: int) -> None:
     for tier, max_pct, label, desc in db.TIER_DEFAULTS:
-        conn.execute("INSERT OR IGNORE INTO tier_rules (user_id, tier, max_pct, label, description) VALUES (?,?,?,?,?)",
+        conn.execute("INSERT OR IGNORE INTO personal_tier_rules (user_id, tier, max_pct, label, description) VALUES (?,?,?,?,?)",
                      (user_id, tier, max_pct, label, desc))
     conn.commit()
 
@@ -113,29 +113,18 @@ def company_id(market: str, ticker: str) -> str:
 
 # ---------------------------------------------------------------- companies
 
-def upsert_company(conn, market, ticker, name, name_en=None, sector=None, notes=None) -> dict:
-    _check(market, db.MARKETS, "market")
-    cid = company_id(market, ticker)
-    conn.execute(
-        """INSERT INTO companies (id, market, ticker, name, name_en, sector, notes)
-           VALUES (?,?,?,?,?,?,?)
-           ON CONFLICT(id) DO UPDATE SET name=excluded.name,
-             name_en=COALESCE(excluded.name_en, companies.name_en),
-             sector=COALESCE(excluded.sector, companies.sector),
-             notes=COALESCE(excluded.notes, companies.notes)""",
-        (cid, market.upper(), ticker.upper(), name, name_en, sector, notes),
-    )
-    conn.commit()
-    return get_company(conn, cid)
+def upsert_company(conn, market, ticker, name, name_en=None, sector=None, notes=None, created_by="user") -> dict:
+    """Knowledge write: goes through the engine (or directly in standalone mode). Needs an admin user."""
+    return knowledge.upsert_company(conn, uid(), market, ticker, name, name_en, sector, notes, created_by)
 
 
 def get_company(conn, cid: str) -> dict | None:
-    return _row(conn.execute("SELECT * FROM companies WHERE id=?", (cid,)))
+    return _row(conn.execute("SELECT * FROM knowledge_companies WHERE id=?", (cid,)))
 
 
 def search_companies(conn, query: str = "", market: str | None = None) -> list[dict]:
     q = f"%{query}%"
-    sql = ("SELECT c.*, p.stage, p.tier FROM companies c LEFT JOIN positions p ON p.company_id=c.id "
+    sql = ("SELECT c.*, p.stage, p.tier FROM knowledge_companies c LEFT JOIN personal_positions p ON p.company_id=c.id "
            "WHERE (c.id LIKE ? OR c.name LIKE ? OR IFNULL(c.name_en,'') LIKE ?)")
     args = [q, q, q]
     if market:
@@ -152,7 +141,7 @@ def resolve_company(conn, ref: str) -> dict:
     if c:
         return c
     rows = _rows(conn.execute(
-        "SELECT * FROM companies WHERE ticker=? OR name=? OR name_en=?", (ref.upper(), ref, ref)))
+        "SELECT * FROM knowledge_companies WHERE ticker=? OR name=? OR name_en=?", (ref.upper(), ref, ref)))
     if len(rows) == 1:
         return rows[0]
     if len(rows) > 1:
@@ -164,48 +153,31 @@ def resolve_company(conn, ref: str) -> dict:
 
 def add_edge(conn, customer_id, supplier_id, revenue_share=None, lag_days=None,
              confidence="medium", source=None, notes=None, created_by="user", relation="customer") -> dict:
-    _check(confidence, db.CONFIDENCES, "confidence")
-    _check(relation, db.RELATIONS, "relation")
-    if customer_id == supplier_id:
-        raise ValueError("a company cannot be its own customer")
-    if revenue_share is not None and not (0 <= revenue_share <= 1):
-        raise ValueError("revenue_share must be 0..1 (fraction of supplier revenue)")
-    for cid in (customer_id, supplier_id):
-        if not get_company(conn, cid):
-            raise ValueError(f"unknown company {cid}")
-    conn.execute(
-        """INSERT INTO edges (customer_id, supplier_id, revenue_share, lag_days, confidence, source, notes, created_by, relation)
-           VALUES (?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(customer_id, supplier_id) DO UPDATE SET
-             revenue_share=COALESCE(excluded.revenue_share, edges.revenue_share),
-             lag_days=COALESCE(excluded.lag_days, edges.lag_days),
-             confidence=excluded.confidence,
-             relation=excluded.relation,
-             source=COALESCE(excluded.source, edges.source),
-             notes=COALESCE(excluded.notes, edges.notes)""",
-        (customer_id, supplier_id, revenue_share, lag_days, confidence, source, notes, created_by, relation),
-    )
-    conn.commit()
-    return _row(conn.execute("SELECT * FROM edges WHERE customer_id=? AND supplier_id=?",
-                             (customer_id, supplier_id)))
+    """Knowledge write via the engine. relation=customer|partner|holding; revenue_share 0..1."""
+    return knowledge.add_edge(conn, uid(), customer_id, supplier_id, revenue_share, lag_days, confidence, source,
+                              notes, created_by, relation)
 
 
 def delete_edge(conn, edge_id: int) -> None:
-    conn.execute("DELETE FROM edges WHERE id=?", (edge_id,))
-    conn.commit()
+    knowledge.delete_edge(conn, uid(), edge_id)
+
+
+def add_edge_weight(conn, edge_id: int, date: str, revenue_share: float, source=None, created_by="user") -> dict:
+    """Record a dated weight (e.g. an ETF constituent's monthly weight); the engine keeps edges.revenue_share current."""
+    return knowledge.add_edge_weight(conn, uid(), edge_id, date, revenue_share, source, created_by)
 
 
 def relations(conn, cid: str) -> dict:
     """Customers (who buy from cid) and suppliers (whom cid buys from)."""
     customers = _rows(conn.execute(
         """SELECT e.*, c.name AS customer_name, c.market AS customer_market, p.stage AS customer_stage
-           FROM edges e JOIN companies c ON c.id=e.customer_id
-           LEFT JOIN positions p ON p.company_id=c.id
+           FROM knowledge_edges e JOIN knowledge_companies c ON c.id=e.customer_id
+           LEFT JOIN personal_positions p ON p.company_id=c.id
            WHERE e.supplier_id=? ORDER BY e.revenue_share DESC NULLS LAST""", (cid,)))
     suppliers = _rows(conn.execute(
         """SELECT e.*, c.name AS supplier_name, c.market AS supplier_market, p.stage AS supplier_stage
-           FROM edges e JOIN companies c ON c.id=e.supplier_id
-           LEFT JOIN positions p ON p.company_id=c.id
+           FROM knowledge_edges e JOIN knowledge_companies c ON c.id=e.supplier_id
+           LEFT JOIN personal_positions p ON p.company_id=c.id
            WHERE e.customer_id=? ORDER BY e.revenue_share DESC NULLS LAST""", (cid,)))
     return {"company": get_company(conn, cid), "customers": customers, "suppliers": suppliers}
 
@@ -236,9 +208,9 @@ def customer_concentration(conn, cid: str) -> dict:
 
 def list_positions(conn, stage: str | None = None, tier: str | None = None) -> list[dict]:
     sql = """SELECT p.*, c.name, c.market, c.ticker, c.sector,
-                    (SELECT MAX(ts) FROM interactions i WHERE i.position_id=p.id) AS last_interaction,
-                    (SELECT COUNT(*) FROM interactions i WHERE i.position_id=p.id) AS interaction_count
-             FROM positions p JOIN companies c ON c.id=p.company_id WHERE p.user_id=?"""
+                    (SELECT MAX(ts) FROM personal_interactions i WHERE i.position_id=p.id) AS last_interaction,
+                    (SELECT COUNT(*) FROM personal_interactions i WHERE i.position_id=p.id) AS interaction_count
+             FROM personal_positions p JOIN knowledge_companies c ON c.id=p.company_id WHERE p.user_id=?"""
     args: list = [uid()]
     if stage:
         _check(stage, db.STAGES, "stage")
@@ -270,22 +242,22 @@ def _days_since(ts: str | None) -> int | None:
 
 def get_position(conn, ref: str | int) -> dict | None:
     if isinstance(ref, int) or str(ref).isdigit() and len(str(ref)) < 4:
-        row = _row(conn.execute("SELECT * FROM positions WHERE id=? AND user_id=?", (int(ref), uid())))
+        row = _row(conn.execute("SELECT * FROM personal_positions WHERE id=? AND user_id=?", (int(ref), uid())))
     else:
         c = resolve_company(conn, str(ref))
-        row = _row(conn.execute("SELECT * FROM positions WHERE company_id=? AND user_id=?", (c["id"], uid())))
+        row = _row(conn.execute("SELECT * FROM personal_positions WHERE company_id=? AND user_id=?", (c["id"], uid())))
     if not row:
         return None
     row = _decode(row)
     row["company"] = get_company(conn, row["company_id"])
     row["interactions"] = [_decode(r) for r in _rows(conn.execute(
-        "SELECT * FROM interactions WHERE position_id=? ORDER BY ts DESC", (row["id"],)))]
+        "SELECT * FROM personal_interactions WHERE position_id=? ORDER BY ts DESC", (row["id"],)))]
     row["reminders"] = _rows(conn.execute(
-        "SELECT * FROM reminders WHERE position_id=? AND done=0 ORDER BY due_date", (row["id"],)))
+        "SELECT * FROM personal_reminders WHERE position_id=? AND done=0 ORDER BY due_date", (row["id"],)))
     rel = relations(conn, row["company_id"])
     row["customers"], row["suppliers"] = rel["customers"], rel["suppliers"]
     row["concentration"] = customer_concentration(conn, row["company_id"])
-    row["tier_rule"] = _row(conn.execute("SELECT * FROM tier_rules WHERE tier=? AND user_id=?", (row["tier"], uid())))
+    row["tier_rule"] = _row(conn.execute("SELECT * FROM personal_tier_rules WHERE tier=? AND user_id=?", (row["tier"], uid())))
     last = row["interactions"][0]["ts"] if row["interactions"] else row["updated_at"]
     row["days_since_update"] = _days_since(last)
     row["drivers"] = list_drivers(conn, row["id"])
@@ -305,10 +277,10 @@ def upsert_position(conn, company_id: str, stage: str, tier: str, thesis=None, i
         _check(thesis_status, db.THESIS_STATUSES, "thesis_status")
     if not get_company(conn, company_id):
         raise ValueError(f"unknown company {company_id}")
-    existing = _row(conn.execute("SELECT * FROM positions WHERE company_id=? AND user_id=?", (company_id, uid())))
+    existing = _row(conn.execute("SELECT * FROM personal_positions WHERE company_id=? AND user_id=?", (company_id, uid())))
     if existing:
         conn.execute(
-            """UPDATE positions SET stage=?, tier=?, thesis=COALESCE(?,thesis),
+            """UPDATE personal_positions SET stage=?, tier=?, thesis=COALESCE(?,thesis),
                invalidation=COALESCE(?,invalidation),
                target_price=COALESCE(?,target_price), stop_price=COALESCE(?,stop_price),
                position_pct=COALESCE(?,position_pct), idea_source=COALESCE(?,idea_source),
@@ -320,7 +292,7 @@ def upsert_position(conn, company_id: str, stage: str, tier: str, thesis=None, i
              shares, avg_cost, _now(), existing["id"]))
     else:
         conn.execute(
-            """INSERT INTO positions (user_id, company_id, stage, tier, thesis, invalidation, target_price, stop_price,
+            """INSERT INTO personal_positions (user_id, company_id, stage, tier, thesis, invalidation, target_price, stop_price,
                position_pct, idea_source, tags, thesis_status, target_basis, model_url, shares, avg_cost)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (uid(), company_id, stage, tier, thesis, invalidation, target_price, stop_price, position_pct or 0,
@@ -331,7 +303,7 @@ def upsert_position(conn, company_id: str, stage: str, tier: str, thesis=None, i
 
 def set_thesis_status(conn, position_id: int, status: str) -> dict:
     _check(status, db.THESIS_STATUSES, "thesis_status")
-    conn.execute("UPDATE positions SET thesis_status=?, updated_at=? WHERE id=? AND user_id=?",
+    conn.execute("UPDATE personal_positions SET thesis_status=?, updated_at=? WHERE id=? AND user_id=?",
                  (status, _now(), position_id, uid()))
     conn.commit()
     return get_position(conn, position_id)
@@ -339,7 +311,8 @@ def set_thesis_status(conn, position_id: int, status: str) -> dict:
 
 def check_tier_limit(conn, position_id: int, new_pct: float) -> dict:
     p = _row(conn.execute(
-        "SELECT p.*, t.max_pct, t.label FROM positions p JOIN tier_rules t ON t.tier=p.tier AND t.user_id=p.user_id "
+        "SELECT p.*, t.max_pct, t.label FROM personal_positions p "
+        "JOIN personal_tier_rules t ON t.tier=p.tier AND t.user_id=p.user_id "
         "WHERE p.id=? AND p.user_id=?", (position_id, uid())))
     if not p:
         raise ValueError("unknown position")
@@ -360,26 +333,26 @@ def add_interaction(conn, position_id: int, kind: str, content: str, price=None,
     _check(kind, db.INTERACTION_KINDS, "kind")
     if effect is not None:
         _check(effect, db.EFFECTS, "effect")
-    if not _row(conn.execute("SELECT id FROM positions WHERE id=? AND user_id=?", (position_id, uid()))):
+    if not _row(conn.execute("SELECT id FROM personal_positions WHERE id=? AND user_id=?", (position_id, uid()))):
         raise ValueError("unknown position")
-    if driver_id and not _row(conn.execute("SELECT id FROM drivers WHERE id=? AND position_id=?",
+    if driver_id and not _row(conn.execute("SELECT id FROM personal_drivers WHERE id=? AND position_id=?",
                                            (driver_id, position_id))):
         raise ValueError("driver_id does not belong to this position")
-    if checkpoint_id and not _row(conn.execute("SELECT id FROM checkpoints WHERE id=? AND position_id=?",
+    if checkpoint_id and not _row(conn.execute("SELECT id FROM personal_checkpoints WHERE id=? AND position_id=?",
                                                (checkpoint_id, position_id))):
         raise ValueError("checkpoint_id does not belong to this position")
     cur = conn.execute(
-        """INSERT INTO interactions (position_id, ts, kind, content, price, behavior_tags, source_url, created_by,
+        """INSERT INTO personal_interactions (position_id, ts, kind, content, price, behavior_tags, source_url, created_by,
                                      driver_id, checkpoint_id, effect)
            VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         (position_id, ts or _now(), kind, content, price, _json_list(behavior_tags), source_url, created_by,
          driver_id, checkpoint_id, effect))
-    conn.execute("UPDATE positions SET updated_at=? WHERE id=?", (_now(), position_id))
+    conn.execute("UPDATE personal_positions SET updated_at=? WHERE id=?", (_now(), position_id))
     if checkpoint_id and effect == "confirms":
-        conn.execute("UPDATE checkpoints SET status='confirmed', evidence=?, interaction_id=?, decided_at=? "
+        conn.execute("UPDATE personal_checkpoints SET status='confirmed', evidence=?, interaction_id=?, decided_at=? "
                      "WHERE id=? AND status='pending'", (content, cur.lastrowid, _now(), checkpoint_id))
     conn.commit()
-    return _decode(_row(conn.execute("SELECT * FROM interactions WHERE id=?", (cur.lastrowid,))))
+    return _decode(_row(conn.execute("SELECT * FROM personal_interactions WHERE id=?", (cur.lastrowid,))))
 
 
 def stale_positions(conn, days: int = 30) -> list[dict]:
@@ -392,29 +365,29 @@ def add_reminder(conn, due_date: str, kind: str, content: str, position_id=None,
     _check(kind, db.REMINDER_KINDS, "kind")
     datetime.strptime(due_date, "%Y-%m-%d")
     cur = conn.execute(
-        "INSERT INTO reminders (user_id, position_id, due_date, kind, content, created_by) VALUES (?,?,?,?,?,?)",
+        "INSERT INTO personal_reminders (user_id, position_id, due_date, kind, content, created_by) VALUES (?,?,?,?,?,?)",
         (uid(), position_id, due_date, kind, content, created_by))
     conn.commit()
-    return _row(conn.execute("SELECT * FROM reminders WHERE id=?", (cur.lastrowid,)))
+    return _row(conn.execute("SELECT * FROM personal_reminders WHERE id=?", (cur.lastrowid,)))
 
 
 def due_reminders(conn, within_days: int = 7) -> list[dict]:
     limit = (datetime.now(timezone.utc) + timedelta(days=within_days)).strftime("%Y-%m-%d")
     return _rows(conn.execute(
-        """SELECT r.*, c.name AS company_name, c.id AS company_id FROM reminders r
-           LEFT JOIN positions p ON p.id=r.position_id LEFT JOIN companies c ON c.id=p.company_id
+        """SELECT r.*, c.name AS company_name, c.id AS company_id FROM personal_reminders r
+           LEFT JOIN personal_positions p ON p.id=r.position_id LEFT JOIN knowledge_companies c ON c.id=p.company_id
            WHERE r.done=0 AND r.user_id=? AND r.due_date<=? ORDER BY r.due_date""", (uid(), limit)))
 
 
 def all_reminders(conn) -> list[dict]:
     return _rows(conn.execute(
-        """SELECT r.*, c.name AS company_name, c.id AS company_id FROM reminders r
-           LEFT JOIN positions p ON p.id=r.position_id LEFT JOIN companies c ON c.id=p.company_id
+        """SELECT r.*, c.name AS company_name, c.id AS company_id FROM personal_reminders r
+           LEFT JOIN personal_positions p ON p.id=r.position_id LEFT JOIN knowledge_companies c ON c.id=p.company_id
            WHERE r.done=0 AND r.user_id=? ORDER BY r.due_date""", (uid(),)))
 
 
 def complete_reminder(conn, reminder_id: int) -> None:
-    conn.execute("UPDATE reminders SET done=1 WHERE id=?", (reminder_id,))
+    conn.execute("UPDATE personal_reminders SET done=1 WHERE id=?", (reminder_id,))
     conn.commit()
 
 
@@ -434,7 +407,7 @@ def indirect_exposure(conn, cid: str, max_depth: int = 2) -> dict:
         node, weight, path, depth = queue.popleft()
         if depth >= max_depth:
             continue
-        for e in _rows(conn.execute("SELECT * FROM edges WHERE customer_id=?", (node,))):
+        for e in _rows(conn.execute("SELECT * FROM knowledge_edges WHERE customer_id=?", (node,))):
             sup = e["supplier_id"]
             if sup in path:
                 continue
@@ -468,7 +441,7 @@ def indirect_exposure(conn, cid: str, max_depth: int = 2) -> dict:
 def portfolio_overlap(conn) -> list[dict]:
     """For every customer company in the graph, total indirect exposure of the held portfolio.
     Reveals 'five positions that are really one NVDA bet'."""
-    customers = _rows(conn.execute("SELECT DISTINCT customer_id FROM edges"))
+    customers = _rows(conn.execute("SELECT DISTINCT customer_id FROM knowledge_edges"))
     out = []
     for c in customers:
         ex = indirect_exposure(conn, c["customer_id"])
@@ -484,11 +457,12 @@ def portfolio_overlap(conn) -> list[dict]:
 
 def export_graph(conn) -> dict:
     nodes = _rows(conn.execute(
-        """SELECT c.*, p.id AS position_id, p.stage, p.tier, p.position_pct, p.thesis_status FROM companies c
-           LEFT JOIN positions p ON p.company_id=c.id ORDER BY c.market, c.ticker"""))
-    edges = _rows(conn.execute("SELECT * FROM edges"))
+        """SELECT c.*, p.id AS position_id, p.stage, p.tier, p.position_pct, p.thesis_status FROM knowledge_companies c
+           LEFT JOIN personal_positions p ON p.company_id=c.id ORDER BY c.market, c.ticker"""))
+    edges = _rows(conn.execute("SELECT * FROM knowledge_edges"))
     return {"nodes": nodes, "edges": edges,
-            "tier_rules": _rows(conn.execute("SELECT * FROM tier_rules WHERE user_id=? ORDER BY max_pct DESC", (uid(),)))}
+            "tier_rules": _rows(conn.execute("SELECT * FROM personal_tier_rules WHERE user_id=? ORDER BY max_pct DESC",
+                                             (uid(),)))}
 
 
 def graph_markdown(conn) -> str:
@@ -544,8 +518,8 @@ def morning_context(conn) -> dict:
                               "issues": h["issues"]})
     soon = (today + timedelta(days=14)).strftime("%Y-%m-%d")
     upcoming = _rows(conn.execute(
-        """SELECT k.*, c.name AS company_name, c.id AS company_id FROM checkpoints k
-           JOIN positions p ON p.id=k.position_id JOIN companies c ON c.id=p.company_id
+        """SELECT k.*, c.name AS company_name, c.id AS company_id FROM personal_checkpoints k
+           JOIN personal_positions p ON p.id=k.position_id JOIN knowledge_companies c ON c.id=p.company_id
            WHERE k.status='pending' AND k.expected_by>=? AND k.expected_by<=? ORDER BY k.expected_by""",
         (_today(), soon)))
     return {
@@ -579,13 +553,17 @@ def proposal_scope(kind: str, payload: dict) -> str:
 
 
 def create_proposal(conn, kind: str, payload: dict, rationale: str, created_by: str) -> dict:
+    """personal scope: stored here, the owner approves. knowledge scope: forwarded to the engine's single
+    review queue (an admin approves it on the unified UI); kept locally only in direct/standalone mode."""
     _check(kind, db.PROPOSAL_KINDS, "kind")
     _validate_payload(conn, kind, payload)
+    if proposal_scope(kind, payload) == "knowledge" and knowledge.mode() == "rest":
+        return knowledge.propose(conn, uid(), kind, payload, rationale, created_by)
     cur = conn.execute(
-        "INSERT INTO proposals (user_id, scope, kind, payload, rationale, created_by) VALUES (?,?,?,?,?,?)",
+        "INSERT INTO personal_proposals (user_id, scope, kind, payload, rationale, created_by) VALUES (?,?,?,?,?,?)",
         (uid(), proposal_scope(kind, payload), kind, json.dumps(payload, ensure_ascii=False), rationale, created_by))
     conn.commit()
-    return _decode(_row(conn.execute("SELECT * FROM proposals WHERE id=?", (cur.lastrowid,))))
+    return _decode(_row(conn.execute("SELECT * FROM personal_proposals WHERE id=?", (cur.lastrowid,))))
 
 
 def _need(p: dict, *keys):
@@ -600,28 +578,28 @@ def _validate_payload(conn, kind, p: dict):
         _check(p["kind"], db.INTERACTION_KINDS, "payload.kind")
         if p.get("effect") is not None:
             _check(p["effect"], db.EFFECTS, "payload.effect")
-        if not _row(conn.execute("SELECT id FROM positions WHERE id=?", (p["position_id"],))):
+        if not _row(conn.execute("SELECT id FROM personal_positions WHERE id=?", (p["position_id"],))):
             raise ValueError("payload.position_id unknown")
     elif kind == "driver":
         _need(p, "position_id", "name")
-        if not _row(conn.execute("SELECT id FROM positions WHERE id=?", (p["position_id"],))):
+        if not _row(conn.execute("SELECT id FROM personal_positions WHERE id=?", (p["position_id"],))):
             raise ValueError("payload.position_id unknown")
     elif kind == "driver_value":
         _need(p, "driver_id", "period", "kind", "value")
         _check(p["kind"], db.VALUE_KINDS, "payload.kind")
         _parse_period(p["period"])
-        if not _row(conn.execute("SELECT id FROM drivers WHERE id=?", (p["driver_id"],))):
+        if not _row(conn.execute("SELECT id FROM personal_drivers WHERE id=?", (p["driver_id"],))):
             raise ValueError("payload.driver_id unknown")
     elif kind == "checkpoint":
         _need(p, "position_id", "title", "expected_by")
         datetime.strptime(p["expected_by"], "%Y-%m-%d")
-        if not _row(conn.execute("SELECT id FROM positions WHERE id=?", (p["position_id"],))):
+        if not _row(conn.execute("SELECT id FROM personal_positions WHERE id=?", (p["position_id"],))):
             raise ValueError("payload.position_id unknown")
     elif kind == "checkpoint_resolve":
         _need(p, "checkpoint_id", "status")
         if p["status"] not in ("confirmed", "missed"):
             raise ValueError("payload.status must be confirmed or missed")
-        if not _row(conn.execute("SELECT id FROM checkpoints WHERE id=?", (p["checkpoint_id"],))):
+        if not _row(conn.execute("SELECT id FROM personal_checkpoints WHERE id=?", (p["checkpoint_id"],))):
             raise ValueError("payload.checkpoint_id unknown")
     elif kind == "brief":
         _need(p, "company_id", "kind", "content")
@@ -659,9 +637,9 @@ def _validate_payload(conn, kind, p: dict):
 def list_proposals(conn, status: str | None = "pending") -> list[dict]:
     """A member sees their own proposals; an admin sees everything (knowledge and every member's personal)."""
     if is_admin(conn):
-        sql, args = "SELECT * FROM proposals WHERE 1=1", []
+        sql, args = "SELECT * FROM personal_proposals WHERE 1=1", []
     else:
-        sql, args = "SELECT * FROM proposals WHERE user_id=?", [uid()]
+        sql, args = "SELECT * FROM personal_proposals WHERE user_id=?", [uid()]
     if status:
         sql += " AND status=?"
         args.append(status)
@@ -674,7 +652,7 @@ def list_proposals(conn, status: str | None = "pending") -> list[dict]:
 
 def _pos_name(conn, position_id) -> str:
     r = _row(conn.execute(
-        "SELECT c.name FROM positions x JOIN companies c ON c.id=x.company_id WHERE x.id=?", (position_id,)))
+        "SELECT c.name FROM personal_positions x JOIN knowledge_companies c ON c.id=x.company_id WHERE x.id=?", (position_id,)))
     return r["name"] if r else "?"
 
 
@@ -691,14 +669,15 @@ def _proposal_summary(conn, pr: dict) -> str:
     if pr["kind"] == "driver":
         return f"新增驅動因子：{_pos_name(conn, p['position_id'])}／{p['name']}"
     if pr["kind"] == "driver_value":
-        d = _row(conn.execute("SELECT d.name, c.name AS cname FROM drivers d JOIN positions x ON x.id=d.position_id "
-                              "JOIN companies c ON c.id=x.company_id WHERE d.id=?", (p["driver_id"],)))
+        d = _row(conn.execute("SELECT d.name, c.name AS cname FROM personal_drivers d "
+                              "JOIN personal_positions x ON x.id=d.position_id "
+                              "JOIN knowledge_companies c ON c.id=x.company_id WHERE d.id=?", (p["driver_id"],)))
         who = f"{d['cname']}／{d['name']}" if d else "?"
         return f"{'實際' if p['kind'] == 'actual' else '模型'}值：{who} {p['period']} = {p['value']}"
     if pr["kind"] == "checkpoint":
         return f"新增檢查點：{_pos_name(conn, p['position_id'])}／{p['title']}（{p['expected_by']} 前）"
     if pr["kind"] == "checkpoint_resolve":
-        c = _row(conn.execute("SELECT title FROM checkpoints WHERE id=?", (p["checkpoint_id"],)))
+        c = _row(conn.execute("SELECT title FROM personal_checkpoints WHERE id=?", (p["checkpoint_id"],)))
         return f"檢查點{'確認' if p['status'] == 'confirmed' else '逾期未達'}：{c['title'] if c else '?'}"
     if pr["kind"] == "metric":
         kind = "實際" if p["kind"] == "actual" else "模型"
@@ -711,7 +690,7 @@ def _proposal_summary(conn, pr: dict) -> str:
 
 
 def decide_proposal(conn, proposal_id: int, approve: bool) -> dict:
-    raw = _row(conn.execute("SELECT * FROM proposals WHERE id=?", (proposal_id,)))
+    raw = _row(conn.execute("SELECT * FROM personal_proposals WHERE id=?", (proposal_id,)))
     if not raw:
         raise ValueError("unknown proposal")
     pr = _decode(raw)
@@ -729,10 +708,10 @@ def decide_proposal(conn, proposal_id: int, approve: bool) -> dict:
             ref = apply_proposal(conn, pr)
         finally:
             CURRENT_USER.reset(token)
-    conn.execute("UPDATE proposals SET status=?, decided_at=?, applied_ref=?, approver_user_id=? WHERE id=?",
+    conn.execute("UPDATE personal_proposals SET status=?, decided_at=?, applied_ref=?, approver_user_id=? WHERE id=?",
                  ("approved" if approve else "rejected", _now(), ref, uid(), proposal_id))
     conn.commit()
-    return _decode(_row(conn.execute("SELECT * FROM proposals WHERE id=?", (proposal_id,))))
+    return _decode(_row(conn.execute("SELECT * FROM personal_proposals WHERE id=?", (proposal_id,))))
 
 
 def apply_proposal(conn, pr: dict) -> str:
@@ -820,10 +799,10 @@ def _today() -> str:
 
 def add_driver(conn, position_id: int, name: str, unit=None, critical=1, sensitivity=None, notes=None,
                higher_is_better=1, created_by="user") -> dict:
-    if not _row(conn.execute("SELECT id FROM positions WHERE id=?", (position_id,))):
+    if not _row(conn.execute("SELECT id FROM personal_positions WHERE id=?", (position_id,))):
         raise ValueError("unknown position")
     cur = conn.execute(
-        """INSERT INTO drivers (position_id, name, unit, critical, higher_is_better, sensitivity, notes, created_by)
+        """INSERT INTO personal_drivers (position_id, name, unit, critical, higher_is_better, sensitivity, notes, created_by)
            VALUES (?,?,?,?,?,?,?,?)""",
         (position_id, name, unit, 1 if critical else 0, 1 if higher_is_better else 0, sensitivity, notes, created_by))
     conn.commit()
@@ -835,13 +814,13 @@ def update_driver(conn, driver_id: int, **fields) -> dict:
     sets = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if sets:
         assignments = ", ".join(f"{k}=?" for k in sets)
-        conn.execute(f"UPDATE drivers SET {assignments} WHERE id=?", (*sets.values(), driver_id))
+        conn.execute(f"UPDATE personal_drivers SET {assignments} WHERE id=?", (*sets.values(), driver_id))
         conn.commit()
     return get_driver(conn, driver_id)
 
 
 def delete_driver(conn, driver_id: int) -> None:
-    conn.execute("DELETE FROM drivers WHERE id=?", (driver_id,))
+    conn.execute("DELETE FROM personal_drivers WHERE id=?", (driver_id,))
     conn.commit()
 
 
@@ -849,23 +828,23 @@ def set_driver_value(conn, driver_id: int, period: str, kind: str, value: float,
                      created_by="user") -> dict:
     _check(kind, db.VALUE_KINDS, "kind")
     _parse_period(period)
-    if not _row(conn.execute("SELECT id FROM drivers WHERE id=?", (driver_id,))):
+    if not _row(conn.execute("SELECT id FROM personal_drivers WHERE id=?", (driver_id,))):
         raise ValueError("unknown driver")
     conn.execute(
-        """INSERT INTO driver_values (driver_id, period, kind, value, source, created_by) VALUES (?,?,?,?,?,?)
+        """INSERT INTO personal_driver_values (driver_id, period, kind, value, source, created_by) VALUES (?,?,?,?,?,?)
            ON CONFLICT(driver_id, period, kind) DO UPDATE SET value=excluded.value,
-             source=COALESCE(excluded.source, driver_values.source), created_by=excluded.created_by""",
+             source=COALESCE(excluded.source, personal_driver_values.source), created_by=excluded.created_by""",
         (driver_id, period.upper(), kind, float(value), source, created_by))
     conn.commit()
-    return _row(conn.execute("SELECT * FROM driver_values WHERE driver_id=? AND period=? AND kind=?",
+    return _row(conn.execute("SELECT * FROM personal_driver_values WHERE driver_id=? AND period=? AND kind=?",
                              (driver_id, period.upper(), kind)))
 
 
 def get_driver(conn, driver_id: int) -> dict | None:
-    d = _row(conn.execute("SELECT * FROM drivers WHERE id=?", (driver_id,)))
+    d = _row(conn.execute("SELECT * FROM personal_drivers WHERE id=?", (driver_id,)))
     if not d:
         return None
-    vals = _rows(conn.execute("SELECT * FROM driver_values WHERE driver_id=?", (driver_id,)))
+    vals = _rows(conn.execute("SELECT * FROM personal_driver_values WHERE driver_id=?", (driver_id,)))
     by_period: dict[str, dict] = {}
     for v in vals:
         by_period.setdefault(v["period"], {"period": v["period"], "model": None, "actual": None, "source": None})
@@ -879,7 +858,7 @@ def get_driver(conn, driver_id: int) -> dict | None:
         else:
             r["gap_pct"] = None
     evidence = _rows(conn.execute(
-        "SELECT id, ts, kind, effect, substr(content,1,120) AS content FROM interactions "
+        "SELECT id, ts, kind, effect, substr(content,1,120) AS content FROM personal_interactions "
         "WHERE driver_id=? ORDER BY ts DESC LIMIT 10", (driver_id,)))
     latest_effect = next((e["effect"] for e in evidence if e["effect"]), None)
     compared = [r for r in series if r["gap_pct"] is not None]
@@ -897,7 +876,7 @@ def get_driver(conn, driver_id: int) -> dict | None:
 
 def list_drivers(conn, position_id: int) -> list[dict]:
     ids = [r["id"] for r in _rows(conn.execute(
-        "SELECT id FROM drivers WHERE position_id=? ORDER BY critical DESC, id", (position_id,)))]
+        "SELECT id FROM personal_drivers WHERE position_id=? ORDER BY critical DESC, id", (position_id,)))]
     return [get_driver(conn, i) for i in ids]
 
 
@@ -906,36 +885,36 @@ def list_drivers(conn, position_id: int) -> list[dict]:
 def add_checkpoint(conn, position_id: int, title: str, expected_by: str, evidence_needed=None,
                    driver_id=None, created_by="user") -> dict:
     datetime.strptime(expected_by, "%Y-%m-%d")
-    if not _row(conn.execute("SELECT id FROM positions WHERE id=? AND user_id=?", (position_id, uid()))):
+    if not _row(conn.execute("SELECT id FROM personal_positions WHERE id=? AND user_id=?", (position_id, uid()))):
         raise ValueError("unknown position")
-    if driver_id and not _row(conn.execute("SELECT id FROM drivers WHERE id=? AND position_id=?",
+    if driver_id and not _row(conn.execute("SELECT id FROM personal_drivers WHERE id=? AND position_id=?",
                                            (driver_id, position_id))):
         raise ValueError("driver_id does not belong to this position")
     cur = conn.execute(
-        """INSERT INTO checkpoints (position_id, driver_id, title, expected_by, evidence_needed, created_by)
+        """INSERT INTO personal_checkpoints (position_id, driver_id, title, expected_by, evidence_needed, created_by)
            VALUES (?,?,?,?,?,?)""", (position_id, driver_id, title, expected_by, evidence_needed, created_by))
     conn.commit()
-    return _row(conn.execute("SELECT * FROM checkpoints WHERE id=?", (cur.lastrowid,)))
+    return _row(conn.execute("SELECT * FROM personal_checkpoints WHERE id=?", (cur.lastrowid,)))
 
 
 def resolve_checkpoint(conn, checkpoint_id: int, status: str, evidence=None, interaction_id=None) -> dict:
     if status not in ("confirmed", "missed", "pending"):
         raise ValueError("status must be confirmed, missed or pending")
-    conn.execute("UPDATE checkpoints SET status=?, evidence=?, interaction_id=?, decided_at=? WHERE id=?",
+    conn.execute("UPDATE personal_checkpoints SET status=?, evidence=?, interaction_id=?, decided_at=? WHERE id=?",
                  (status, evidence, interaction_id, _now() if status != "pending" else None, checkpoint_id))
     conn.commit()
-    return _row(conn.execute("SELECT * FROM checkpoints WHERE id=?", (checkpoint_id,)))
+    return _row(conn.execute("SELECT * FROM personal_checkpoints WHERE id=?", (checkpoint_id,)))
 
 
 def delete_checkpoint(conn, checkpoint_id: int) -> None:
-    conn.execute("DELETE FROM checkpoints WHERE id=?", (checkpoint_id,))
+    conn.execute("DELETE FROM personal_checkpoints WHERE id=?", (checkpoint_id,))
     conn.commit()
 
 
 def list_checkpoints(conn, position_id: int | None = None, status: str | None = None) -> list[dict]:
-    sql = """SELECT k.*, d.name AS driver_name, c.name AS company_name, c.id AS company_id FROM checkpoints k
-             LEFT JOIN drivers d ON d.id=k.driver_id
-             JOIN positions p ON p.id=k.position_id JOIN companies c ON c.id=p.company_id WHERE 1=1"""
+    sql = """SELECT k.*, d.name AS driver_name, c.name AS company_name, c.id AS company_id FROM personal_checkpoints k
+             LEFT JOIN personal_drivers d ON d.id=k.driver_id
+             JOIN personal_positions p ON p.id=k.position_id JOIN knowledge_companies c ON c.id=p.company_id WHERE 1=1"""
     args = []
     if position_id:
         sql += " AND k.position_id=?"
@@ -962,6 +941,7 @@ def overdue_checkpoints(conn) -> list[dict]:
 
 def set_metric(conn, company_id: str, metric: str, period: str, kind: str, value: float, source=None,
                created_by="user") -> dict:
+    """kind=model -> the current user's personal_model_values. kind=actual -> knowledge_metrics via the engine."""
     _check(metric, db.METRICS, "metric")
     _check(kind, db.VALUE_KINDS, "kind")
     g, _, _ = _parse_period(period)
@@ -971,23 +951,33 @@ def set_metric(conn, company_id: str, metric: str, period: str, kind: str, value
         raise ValueError(f"{metric} needs a quarter (2026Q2) or year (2026) period")
     if not get_company(conn, company_id):
         raise ValueError(f"unknown company {company_id}")
+    if kind == "actual":
+        row = knowledge.set_metric_actual(conn, uid(), company_id, metric, period, value, source, created_by)
+        return {**row, "kind": "actual"}
     conn.execute(
-        """INSERT INTO metrics (company_id, metric, period, kind, value, source, created_by) VALUES (?,?,?,?,?,?,?)
-           ON CONFLICT(company_id, metric, period, kind) DO UPDATE SET value=excluded.value,
-             source=COALESCE(excluded.source, metrics.source), created_by=excluded.created_by""",
-        (company_id, metric, period.upper(), kind, float(value), source, created_by))
+        """INSERT INTO personal_model_values (user_id, company_id, metric, period, value, source, created_by)
+           VALUES (?,?,?,?,?,?,?)
+           ON CONFLICT(user_id, company_id, metric, period) DO UPDATE SET value=excluded.value,
+             source=COALESCE(excluded.source, personal_model_values.source), created_by=excluded.created_by""",
+        (uid(), company_id, metric, period.upper(), float(value), source, created_by))
     conn.commit()
-    return _row(conn.execute("SELECT * FROM metrics WHERE company_id=? AND metric=? AND period=? AND kind=?",
-                             (company_id, metric, period.upper(), kind)))
+    row = _row(conn.execute("SELECT * FROM personal_model_values WHERE user_id=? AND company_id=? AND metric=? AND period=?",
+                            (uid(), company_id, metric, period.upper())))
+    return {**row, "kind": "model"}
 
 
 def list_metrics(conn, company_id: str, metric: str | None = None) -> list[dict]:
-    sql = "SELECT * FROM metrics WHERE company_id=?"
-    args = [company_id]
+    """Actuals (shared) plus the current user's model values, each row tagged with kind."""
+    sql_a = "SELECT *, 'actual' AS kind FROM knowledge_metrics WHERE company_id=?"
+    sql_m = "SELECT *, 'model' AS kind FROM personal_model_values WHERE company_id=? AND user_id=?"
+    args_a: list = [company_id]
+    args_m: list = [company_id, uid()]
     if metric:
-        sql += " AND metric=?"
-        args.append(metric)
-    rows = _rows(conn.execute(sql, args))
+        sql_a += " AND metric=?"
+        sql_m += " AND metric=?"
+        args_a.append(metric)
+        args_m.append(metric)
+    rows = _rows(conn.execute(sql_a, args_a)) + _rows(conn.execute(sql_m, args_m))
     return sorted(rows, key=lambda r: (r["metric"], _period_sort_key(r["period"]), r["kind"]))
 
 
@@ -1051,7 +1041,7 @@ def metric_comparison(conn, company_id: str) -> dict:
 def thesis_health(conn, position_id: int, _pos: dict | None = None) -> dict:
     """Issues that should make the user re-examine the thesis. Does NOT change thesis_status;
     apply_health_flags() does that explicitly."""
-    pos = _pos or _row(conn.execute("SELECT * FROM positions WHERE id=?", (position_id,)))
+    pos = _pos or _row(conn.execute("SELECT * FROM personal_positions WHERE id=?", (position_id,)))
     if not pos:
         raise ValueError("unknown position")
     issues = []
@@ -1191,12 +1181,12 @@ def apply_template(conn, position_id: int, key: str, created_by="user") -> dict:
 # still goes through proposals; thesis/positions stay the user's.
 
 def tw_companies(conn) -> list[dict]:
-    """TW companies worth fetching: every TW company that has a card or sits on an edge.
-    ETFs (sector 'ETF') are skipped: no revenue, no income statement."""
+    """TW companies the engine should keep official data current for: any TW company with a card (any user)
+    or on an edge. ETFs (sector 'ETF') are skipped: no revenue, no income statement."""
     return _rows(conn.execute(
-        """SELECT DISTINCT c.id, c.ticker, c.name FROM companies c
-           LEFT JOIN positions p ON p.company_id=c.id
-           LEFT JOIN edges e ON e.customer_id=c.id OR e.supplier_id=c.id
+        """SELECT DISTINCT c.id, c.ticker, c.name FROM knowledge_companies c
+           LEFT JOIN personal_positions p ON p.company_id=c.id
+           LEFT JOIN knowledge_edges e ON e.customer_id=c.id OR e.supplier_id=c.id
            WHERE c.market='TW' AND IFNULL(c.sector,'')<>'ETF' AND (p.id IS NOT NULL OR e.id IS NOT NULL)
            ORDER BY c.ticker"""))
 
@@ -1205,14 +1195,14 @@ def log_maintenance(conn, job: str, status: str, summary: str, details=None) -> 
     if status not in ("ok", "error", "skipped"):
         raise ValueError("status must be ok, error or skipped")
     payload = json.dumps(details, ensure_ascii=False, default=str) if details is not None else None
-    cur = conn.execute("INSERT INTO maintenance_log (job, status, summary, details) VALUES (?,?,?,?)",
+    cur = conn.execute("INSERT INTO crm_maintenance_log (job, status, summary, details) VALUES (?,?,?,?)",
                        (job, status, summary, payload))
     conn.commit()
-    return _row(conn.execute("SELECT * FROM maintenance_log WHERE id=?", (cur.lastrowid,)))
+    return _row(conn.execute("SELECT * FROM crm_maintenance_log WHERE id=?", (cur.lastrowid,)))
 
 
 def list_maintenance(conn, limit: int = 30) -> list[dict]:
-    rows = _rows(conn.execute("SELECT * FROM maintenance_log ORDER BY ts DESC, id DESC LIMIT ?", (limit,)))
+    rows = _rows(conn.execute("SELECT * FROM crm_maintenance_log ORDER BY ts DESC, id DESC LIMIT ?", (limit,)))
     for r in rows:
         if r["details"]:
             try:
@@ -1223,11 +1213,12 @@ def list_maintenance(conn, limit: int = 30) -> list[dict]:
 
 
 def last_run(conn, job: str) -> dict | None:
-    return _row(conn.execute("SELECT * FROM maintenance_log WHERE job=? ORDER BY ts DESC, id DESC LIMIT 1", (job,)))
+    return _row(conn.execute("SELECT * FROM crm_maintenance_log WHERE job=? ORDER BY ts DESC, id DESC LIMIT 1", (job,)))
 
 
 def backup_db(conn, keep_days: int = 30, backup_dir=None) -> dict:
-    """Consistent online copy of the database via the SQLite backup API; prunes copies older than keep_days."""
+    """Consistent online copy of the (shared) database via the SQLite backup API; prunes copies older than keep_days.
+    The engine also backs the file up; this copy lives next to it under backups/ as the CRM's own safety net."""
     import sqlite3 as _sq
     from pathlib import Path
     src_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
@@ -1251,72 +1242,23 @@ def backup_db(conn, keep_days: int = 30, backup_dir=None) -> dict:
             "kept": len(list(bdir.glob(f"{src_path.stem}-*.db")))}
 
 
-def upsert_financials_ytd(conn, company_id, year, quarter, revenue, gross_profit, opex, net_income, eps, source=None):
-    conn.execute(
-        """INSERT INTO financials_ytd (company_id, year, quarter, revenue, gross_profit, opex, net_income, eps,
-                                       source, fetched_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(company_id, year, quarter) DO UPDATE SET revenue=excluded.revenue, gross_profit=excluded.gross_profit,
-             opex=excluded.opex, net_income=excluded.net_income, eps=excluded.eps, source=excluded.source,
-             fetched_at=excluded.fetched_at""",
-        (company_id, int(year), int(quarter), revenue, gross_profit, opex, net_income, eps, source, _now()))
-    conn.commit()
-
-
-def derive_quarterly_metrics(conn, company_id, year, quarter, created_by="system:mops") -> dict:
-    """Turn YTD figures into single-quarter metrics: Q1 as is; Qn = YTD(Qn) - YTD(Qn-1) when stored."""
-    cur = _row(conn.execute("SELECT * FROM financials_ytd WHERE company_id=? AND year=? AND quarter=?",
-                            (company_id, year, quarter)))
-    if not cur:
-        return {"written": [], "reason": "no ytd row"}
-    if quarter == 1:
-        prev = {"revenue": 0, "gross_profit": 0, "opex": 0, "net_income": 0, "eps": 0}
-    else:
-        prev = _row(conn.execute("SELECT * FROM financials_ytd WHERE company_id=? AND year=? AND quarter=?",
-                                 (company_id, year, quarter - 1)))
-        if not prev:
-            return {"written": [], "reason": f"need YTD for Q{quarter - 1} {year} to difference; stored YTD only"}
-    period = f"{year}Q{quarter}"
-    written = []
-
-    def diff(k):
-        if cur[k] is None or prev[k] is None:
-            return None
-        return cur[k] - prev[k]
-
-    rev, gp, opex, eps = diff("revenue"), diff("gross_profit"), diff("opex"), diff("eps")
-    if rev:
-        set_metric(conn, company_id, "revenue_q", period, "actual", rev, cur["source"], created_by)
-        written.append("revenue_q")
-        if gp is not None:
-            set_metric(conn, company_id, "gross_margin", period, "actual", round(gp / rev, 4), cur["source"], created_by)
-            written.append("gross_margin")
-    if opex is not None:
-        set_metric(conn, company_id, "opex", period, "actual", opex, cur["source"], created_by)
-        written.append("opex")
-    if eps is not None:
-        set_metric(conn, company_id, "eps", period, "actual", round(eps, 2), cur["source"], created_by)
-        written.append("eps")
-    return {"written": written, "period": period}
-
-
 def data_quality_report(conn, stale_days: int = 30, proposal_days: int = 14) -> dict:
     """What a maintainer should fix or chase. Each list holds small dicts; counts are summed in `total`."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=proposal_days)).strftime("%Y-%m-%d %H:%M:%S")
     rep = {
         "edges_without_source": _rows(conn.execute(
-            "SELECT id, customer_id, supplier_id, revenue_share FROM edges WHERE source IS NULL OR source=''")),
+            "SELECT id, customer_id, supplier_id, revenue_share FROM knowledge_edges WHERE source IS NULL OR source=''")),
         "critical_drivers_without_model": _rows(conn.execute(
-            """SELECT d.id, d.name, c.name AS company FROM drivers d JOIN positions p ON p.id=d.position_id
-               JOIN companies c ON c.id=p.company_id
+            """SELECT d.id, d.name, c.name AS company FROM personal_drivers d JOIN personal_positions p ON p.id=d.position_id
+               JOIN knowledge_companies c ON c.id=p.company_id
                WHERE p.user_id=? AND d.critical=1
-                 AND NOT EXISTS (SELECT 1 FROM driver_values v WHERE v.driver_id=d.id AND v.kind='model')""", (uid(),))),
+                 AND NOT EXISTS (SELECT 1 FROM personal_driver_values v WHERE v.driver_id=d.id AND v.kind='model')""", (uid(),))),
         "holdings_without_invalidation": _rows(conn.execute(
-            """SELECT p.id, c.name FROM positions p JOIN companies c ON c.id=p.company_id
+            """SELECT p.id, c.name FROM personal_positions p JOIN knowledge_companies c ON c.id=p.company_id
                WHERE p.user_id=? AND p.stage='hold' AND (p.invalidation IS NULL OR p.invalidation='')""", (uid(),))),
         "holdings_without_drivers": _rows(conn.execute(
-            """SELECT p.id, c.name FROM positions p JOIN companies c ON c.id=p.company_id
-               WHERE p.user_id=? AND p.stage='hold' AND NOT EXISTS (SELECT 1 FROM drivers d WHERE d.position_id=p.id)""",
+            """SELECT p.id, c.name FROM personal_positions p JOIN knowledge_companies c ON c.id=p.company_id
+               WHERE p.user_id=? AND p.stage='hold' AND NOT EXISTS (SELECT 1 FROM personal_drivers d WHERE d.position_id=p.id)""",
             (uid(),))),
         "proposals_pending_too_long": [{k: p[k] for k in ("id", "kind", "created_by", "created_at")}
                                        for p in list_proposals(conn, "pending") if p["created_at"] < cutoff],
@@ -1329,7 +1271,7 @@ def data_quality_report(conn, stale_days: int = 30, proposal_days: int = 14) -> 
     stale_rev = []
     for c in tw_companies(conn):
         last = _row(conn.execute(
-            "SELECT MAX(period) AS p FROM metrics WHERE company_id=? AND metric='revenue_m' AND kind='actual'", (c["id"],)))
+            "SELECT MAX(period) AS p FROM knowledge_metrics WHERE company_id=? AND metric='revenue_m'", (c["id"],)))
         p = last["p"] if last else None
         if p:
             y, m = int(p[:4]), int(p[5:])
@@ -1365,41 +1307,14 @@ def quality_markdown(rep: dict) -> str:
     return "\n".join(lines)
 
 
-def rename_company(conn, old_id: str, market: str, ticker: str, name: str | None = None) -> dict:
-    """Change a company's id (e.g. a placeholder ticker to the real one) across every table that
-    references it. Positions, edges, metrics and YTD financials follow; the old id disappears."""
-    _check(market, db.MARKETS, "market")
-    old = get_company(conn, old_id)
-    if not old:
-        raise ValueError(f"unknown company {old_id}")
-    new_id = company_id(market, ticker)
-    if new_id != old_id and get_company(conn, new_id):
-        raise ValueError(f"{new_id} already exists; merge by hand")
-    conn.execute("PRAGMA foreign_keys = OFF")
-    try:
-        conn.execute("BEGIN")
-        conn.execute("UPDATE companies SET id=?, market=?, ticker=?, name=COALESCE(?, name) WHERE id=?",
-                     (new_id, market.upper(), ticker.upper(), name, old_id))
-        for table, col in (("positions", "company_id"), ("edges", "customer_id"), ("edges", "supplier_id"),
-                           ("metrics", "company_id"), ("financials_ytd", "company_id"),
-                           ("company_briefs", "company_id")):
-            conn.execute(f"UPDATE {table} SET {col}=? WHERE {col}=?", (new_id, old_id))
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.execute("PRAGMA foreign_keys = ON")
-    return get_company(conn, new_id)
-
-
-DATA_TABLES = ("proposals", "reminders", "interactions", "checkpoints", "driver_values", "drivers",
-               "metrics", "financials_ytd", "company_briefs", "positions", "edges", "companies")   # users kept
+DATA_TABLES = ("personal_proposals", "personal_reminders", "personal_interactions", "personal_checkpoints",
+               "personal_driver_values", "personal_drivers", "personal_model_values", "personal_company_notes",
+               "personal_positions")   # knowledge_* belongs to the engine; users and tier rules are kept
 
 
 def reset_data(conn, keep_log: bool = True) -> dict:
-    """Delete every user/agent data row. Keeps the schema, tier_rules and (by default) maintenance_log.
-    Callers must back up first; this is irreversible."""
+    """Delete every personal-layer row (all users). Knowledge tables, users, tier rules and (by default) the
+    job log are kept. Callers must back up first; this is irreversible."""
     counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in DATA_TABLES}
     conn.execute("PRAGMA foreign_keys = OFF")
     try:
@@ -1407,7 +1322,7 @@ def reset_data(conn, keep_log: bool = True) -> dict:
         for t in DATA_TABLES:
             conn.execute(f"DELETE FROM {t}")
         if not keep_log:
-            conn.execute("DELETE FROM maintenance_log")
+            conn.execute("DELETE FROM crm_maintenance_log")
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -1425,24 +1340,8 @@ def reset_data(conn, keep_log: bool = True) -> dict:
 
 def add_brief(conn, company_id: str, kind: str, content: str, sources=None, date: str | None = None,
               created_by: str = "user") -> dict:
-    _check(kind, db.BRIEF_KINDS, "kind")
-    if not get_company(conn, company_id):
-        raise ValueError(f"unknown company {company_id}")
-    if not content or not content.strip():
-        raise ValueError("content is empty")
-    date = date or _today()
-    datetime.strptime(date, "%Y-%m-%d")
-    if sources is None:
-        sources = []
-    if isinstance(sources, str):
-        sources = json.loads(sources)
-    if not isinstance(sources, list):
-        raise ValueError("sources must be a list of {title, url, date}")
-    cur = conn.execute(
-        "INSERT INTO company_briefs (company_id, date, kind, content, sources, created_by) VALUES (?,?,?,?,?,?)",
-        (company_id, date, kind, content.strip(), json.dumps(sources, ensure_ascii=False), created_by))
-    conn.commit()
-    return get_brief(conn, cur.lastrowid)
+    """Knowledge write via the engine (profile / highlights). Append-only."""
+    return _decode_brief(knowledge.add_brief(conn, uid(), company_id, kind, content, sources, date, created_by))
 
 
 def _decode_brief(r: dict) -> dict:
@@ -1454,12 +1353,12 @@ def _decode_brief(r: dict) -> dict:
 
 
 def get_brief(conn, brief_id: int) -> dict | None:
-    r = _row(conn.execute("SELECT * FROM company_briefs WHERE id=?", (brief_id,)))
+    r = _row(conn.execute("SELECT * FROM knowledge_company_briefs WHERE id=?", (brief_id,)))
     return _decode_brief(r) if r else None
 
 
 def list_briefs(conn, company_id: str, kind: str | None = None, limit: int = 20) -> list[dict]:
-    sql = "SELECT * FROM company_briefs WHERE company_id=?"
+    sql = "SELECT * FROM knowledge_company_briefs WHERE company_id=?"
     args: list = [company_id]
     if kind:
         _check(kind, db.BRIEF_KINDS, "kind")

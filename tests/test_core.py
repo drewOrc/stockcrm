@@ -10,6 +10,7 @@ from stockcrm import core, db  # noqa: E402
 
 @pytest.fixture
 def conn(tmp_path):
+    core.set_current_user(1)
     c = db.connect(tmp_path / "t.db")
     core.upsert_company(c, "TW", "2330", "台積電")
     core.upsert_company(c, "TW", "2382", "廣達")
@@ -214,73 +215,6 @@ def test_template_creates_drivers_and_checkpoints(conn):
         core.apply_template(conn, p["id"], "nope")
 
 
-def test_migration_adds_columns_to_old_db(tmp_path):
-    import sqlite3
-    old = tmp_path / "old.db"
-    s = sqlite3.connect(old)
-    s.executescript("""
-      CREATE TABLE companies (id TEXT PRIMARY KEY, market TEXT, ticker TEXT, name TEXT, name_en TEXT, sector TEXT,
-        notes TEXT, created_at TEXT);
-      CREATE TABLE edges (id INTEGER PRIMARY KEY, customer_id TEXT, supplier_id TEXT, revenue_share REAL, lag_days INTEGER,
-        confidence TEXT, source TEXT, notes TEXT, created_by TEXT, created_at TEXT, UNIQUE(customer_id, supplier_id));
-      CREATE TABLE positions (id INTEGER PRIMARY KEY, company_id TEXT UNIQUE, stage TEXT, tier TEXT, thesis TEXT,
-        invalidation TEXT,
-        thesis_status TEXT DEFAULT 'intact', target_price REAL, stop_price REAL, position_pct REAL DEFAULT 0, idea_source TEXT,
-        tags TEXT DEFAULT '[]', created_at TEXT, updated_at TEXT);
-      CREATE TABLE interactions (id INTEGER PRIMARY KEY, position_id INTEGER, ts TEXT, kind TEXT, content TEXT, price REAL,
-        behavior_tags TEXT DEFAULT '[]', source_url TEXT, created_by TEXT, created_at TEXT);
-      CREATE TABLE proposals (id INTEGER PRIMARY KEY,
-        kind TEXT NOT NULL CHECK (kind IN ('interaction','edge','thesis_status','reminder')),
-        payload TEXT NOT NULL, rationale TEXT NOT NULL, created_by TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-        created_at TEXT NOT NULL DEFAULT (datetime('now')), decided_at TEXT, applied_ref TEXT);
-      INSERT INTO proposals (kind, payload, rationale, created_by) VALUES ('reminder', '{}', 'r', 'a');
-    """)
-    s.commit()
-    s.close()
-    c = db.connect(old)
-    cols = {r[1] for r in c.execute("PRAGMA table_info(interactions)")}
-    assert {"driver_id", "checkpoint_id", "effect"} <= cols
-    assert "relation" in {r[1] for r in c.execute("PRAGMA table_info(edges)")}
-    c.execute("INSERT INTO proposals (kind, payload, rationale, created_by) VALUES ('metric', '{}', 'r', 'a')")
-    assert c.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 2
-
-
-def test_rename_company_moves_references(conn):
-    core.set_metric(conn, "TW:2382", "revenue_m", "2026-09", "actual", 1)
-    c = core.rename_company(conn, "TW:2382", "TW", "4542", "科嶠")
-    assert c["id"] == "TW:4542" and c["name"] == "科嶠"
-    assert core.get_company(conn, "TW:2382") is None
-    assert core.get_position(conn, "TW:4542")["company_id"] == "TW:4542"
-    assert any(e["supplier_id"] == "TW:4542" for e in core.export_graph(conn)["edges"])
-    assert core.list_metrics(conn, "TW:4542", "revenue_m")[0]["value"] == 1
-    with pytest.raises(ValueError):
-        core.rename_company(conn, "TW:4542", "TW", "2330")
-
-
-def test_holding_relation_and_migration_from_partner_only_check(tmp_path):
-    import sqlite3
-    old = tmp_path / "e.db"
-    s = sqlite3.connect(old)
-    s.executescript("""
-      CREATE TABLE companies (id TEXT PRIMARY KEY, market TEXT, ticker TEXT, name TEXT, name_en TEXT, sector TEXT,
-        notes TEXT, created_at TEXT);
-      CREATE TABLE edges (id INTEGER PRIMARY KEY, customer_id TEXT NOT NULL REFERENCES companies(id),
-        supplier_id TEXT NOT NULL REFERENCES companies(id), revenue_share REAL, lag_days INTEGER,
-        confidence TEXT NOT NULL DEFAULT 'medium' CHECK (confidence IN ('high','medium','low')),
-        relation TEXT NOT NULL DEFAULT 'customer' CHECK (relation IN ('customer','partner')),
-        source TEXT, notes TEXT, created_by TEXT NOT NULL DEFAULT 'user',
-        created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (customer_id, supplier_id));
-      INSERT INTO companies (id, market, ticker, name) VALUES ('TW:2330','TW','2330','台積電'), ('TW:00981A','TW','00981A','ETF');
-      INSERT INTO edges (customer_id, supplier_id, revenue_share, relation) VALUES ('TW:2330','TW:00981A',0.5,'partner');
-    """)
-    s.commit()
-    s.close()
-    c = db.connect(old)
-    e = core.add_edge(c, "TW:2330", "TW:00981A", 0.1184, relation="holding", source="MoneyDJ 2026-10-30")
-    assert e["relation"] == "holding" and e["revenue_share"] == 0.1184
-    assert len(core.export_graph(c)["edges"]) == 1  # upsert kept the single row
-
-
 def test_etf_holding_exposure(conn):
     core.upsert_company(conn, "TW", "00981A", "ETF", sector="ETF")
     core.upsert_position(conn, "TW:00981A", "hold", "core", position_pct=100)
@@ -323,14 +257,6 @@ def test_brief_proposal_applies(conn):
     assert core.list_briefs(conn, "TW:2382")[0]["created_by"] == "agent:t"
 
 
-def test_reset_and_rename_cover_briefs(conn):
-    core.add_brief(conn, "TW:2382", "profile", "伺服器 ODM。")
-    core.rename_company(conn, "TW:2382", "TW", "9999")
-    assert core.list_briefs(conn, "TW:9999")[0]["content"] == "伺服器 ODM。"
-    core.reset_data(conn)
-    assert conn.execute("SELECT COUNT(*) FROM company_briefs").fetchone()[0] == 0
-
-
 def test_shares_avg_cost_and_alert_kind(conn):
     p = core.upsert_position(conn, "TW:2330", "hold", "core", shares=3000, avg_cost=29.44)
     assert p["shares"] == 3000 and p["avg_cost"] == 29.44
@@ -341,40 +267,25 @@ def test_shares_avg_cost_and_alert_kind(conn):
     assert i["kind"] == "alert"
 
 
-def test_alert_kind_migration_keeps_checkpoint_reference(tmp_path):
-    import sqlite3
-    old = tmp_path / "a.db"
-    s = sqlite3.connect(old)
-    s.executescript("""
-      CREATE TABLE companies (id TEXT PRIMARY KEY, market TEXT, ticker TEXT, name TEXT, name_en TEXT, sector TEXT,
-        notes TEXT, created_at TEXT);
-      CREATE TABLE positions (id INTEGER PRIMARY KEY, company_id TEXT UNIQUE, stage TEXT, tier TEXT, thesis TEXT,
-        invalidation TEXT, thesis_status TEXT DEFAULT 'intact', target_price REAL, stop_price REAL,
-        position_pct REAL DEFAULT 0, idea_source TEXT, tags TEXT DEFAULT '[]', created_at TEXT, updated_at TEXT);
-      CREATE TABLE drivers (id INTEGER PRIMARY KEY, position_id INTEGER, name TEXT);
-      CREATE TABLE interactions (id INTEGER PRIMARY KEY,
-        position_id INTEGER NOT NULL REFERENCES positions(id) ON DELETE CASCADE,
-        ts TEXT NOT NULL DEFAULT (datetime('now')),
-        kind TEXT NOT NULL CHECK (kind IN ('buy','sell','add','trim','news','earnings','call','thought','review')),
-        content TEXT NOT NULL, price REAL, behavior_tags TEXT NOT NULL DEFAULT '[]', source_url TEXT,
-        created_by TEXT NOT NULL DEFAULT 'user', created_at TEXT NOT NULL DEFAULT (datetime('now')));
-      CREATE TABLE checkpoints (id INTEGER PRIMARY KEY, position_id INTEGER NOT NULL, driver_id INTEGER, title TEXT NOT NULL,
-        expected_by TEXT NOT NULL, evidence_needed TEXT, status TEXT NOT NULL DEFAULT 'pending', evidence TEXT,
-        interaction_id INTEGER REFERENCES interactions(id) ON DELETE SET NULL, decided_at TEXT,
-        created_by TEXT NOT NULL DEFAULT 'user', created_at TEXT NOT NULL DEFAULT (datetime('now')));
-      INSERT INTO companies (id, market, ticker, name) VALUES ('TW:2330','TW','2330','台積電');
-      INSERT INTO positions (company_id, stage, tier) VALUES ('TW:2330','hold','core');
-      INSERT INTO interactions (position_id, kind, content) VALUES (1, 'buy', 'x');
-      INSERT INTO checkpoints (position_id, title, expected_by, status, interaction_id)
-        VALUES (1, 'k', '2026-01-01', 'confirmed', 1);
-    """)
-    s.commit()
-    s.close()
-    c = db.connect(old)
-    sql = c.execute("SELECT sql FROM sqlite_master WHERE name='interactions'").fetchone()[0]
-    assert "'alert'" in sql
-    assert c.execute("SELECT COUNT(*) FROM interactions").fetchone()[0] == 1
-    fk = c.execute("SELECT sql FROM sqlite_master WHERE name='checkpoints'").fetchone()[0]
-    assert "REFERENCES interactions(id)" in fk
-    core.add_interaction(c, 1, "alert", "[引擎警示] test", price=1)
-    assert c.execute("PRAGMA foreign_key_check").fetchall() == []
+
+def test_holding_relation_edge(conn):
+    core.upsert_company(conn, "TW", "00981A", "ETF", sector="ETF")
+    e = core.add_edge(conn, "TW:2330", "TW:00981A", 0.1184, relation="holding", source="MoneyDJ 2026-10-30")
+    assert e["relation"] == "holding"
+    w = core.add_edge_weight(conn, e["id"], "2026-11-30", 0.125, "MoneyDJ")
+    assert w["revenue_share"] == 0.125                       # newest weight becomes the edge's current share
+    assert conn.execute("SELECT COUNT(*) FROM knowledge_edge_weights WHERE edge_id=?", (e["id"],)).fetchone()[0] == 1
+
+
+def test_model_values_are_per_user_and_actuals_shared(conn):
+    core.set_metric(conn, "TW:2330", "revenue_q", "2026Q4", "model", 1000)
+    core.set_metric(conn, "TW:2330", "revenue_m", "2026-10", "actual", 400)
+    kinds = {(r["kind"], r["period"]) for r in core.list_metrics(conn, "TW:2330")}
+    assert kinds == {("model", "2026Q4"), ("actual", "2026-10")}
+    fam = core.create_user(conn, "mom", "媽媽")
+    core.set_current_user(fam["id"])
+    kinds = {(r["kind"], r["period"]) for r in core.list_metrics(conn, "TW:2330")}
+    assert kinds == {("actual", "2026-10")}                  # sees the shared actual, not Drew's model
+    assert core.metric_comparison(conn, "TW:2330")["run_rate"] == []
+    core.set_current_user(1)
+    assert core.metric_comparison(conn, "TW:2330")["run_rate"][0]["projected"] == 1200

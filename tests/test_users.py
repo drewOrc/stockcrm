@@ -1,6 +1,5 @@
 """Multi-user step 1: users table, per-user scoping, proposal scope/approval, legacy migration."""
 import pathlib
-import sqlite3
 import sys
 
 import pytest
@@ -83,48 +82,6 @@ def test_admin_applies_member_proposal_into_member_layer(conn):
     assert core.get_position(conn, "2330")["interactions"][0]["content"] == "hers"
 
 
-def test_legacy_single_user_db_migrates_with_references_intact(tmp_path):
-    old = tmp_path / "legacy.db"
-    s = sqlite3.connect(old)
-    s.executescript("""
-      CREATE TABLE companies (id TEXT PRIMARY KEY, market TEXT, ticker TEXT, name TEXT, name_en TEXT, sector TEXT,
-        notes TEXT, created_at TEXT);
-      CREATE TABLE positions (id INTEGER PRIMARY KEY, company_id TEXT NOT NULL UNIQUE REFERENCES companies(id),
-        stage TEXT NOT NULL, tier TEXT NOT NULL, thesis TEXT, invalidation TEXT, thesis_status TEXT NOT NULL DEFAULT 'intact',
-        target_price REAL, stop_price REAL, position_pct REAL NOT NULL DEFAULT 0, idea_source TEXT,
-        tags TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now')));
-      CREATE TABLE drivers (id INTEGER PRIMARY KEY, position_id INTEGER NOT NULL REFERENCES positions(id) ON DELETE CASCADE,
-        name TEXT NOT NULL, unit TEXT, critical INTEGER NOT NULL DEFAULT 1, higher_is_better INTEGER NOT NULL DEFAULT 1,
-        sensitivity TEXT, notes TEXT, created_by TEXT NOT NULL DEFAULT 'user',
-        created_at TEXT NOT NULL DEFAULT (datetime('now')));
-      CREATE TABLE interactions (id INTEGER PRIMARY KEY,
-        position_id INTEGER NOT NULL REFERENCES positions(id) ON DELETE CASCADE,
-        ts TEXT NOT NULL DEFAULT (datetime('now')), kind TEXT NOT NULL, content TEXT NOT NULL, price REAL,
-        behavior_tags TEXT NOT NULL DEFAULT '[]', source_url TEXT, created_by TEXT NOT NULL DEFAULT 'user',
-        created_at TEXT NOT NULL DEFAULT (datetime('now')));
-      CREATE TABLE tier_rules (tier TEXT PRIMARY KEY, max_pct REAL NOT NULL, label TEXT NOT NULL, description TEXT NOT NULL);
-      INSERT INTO tier_rules VALUES ('core', 20, '核心', 'x'), ('satellite', 5, '衛星', 'x'), ('watch', 0, '觀察', 'x'),
-        ('blacklist', 0, '黑名單', 'x');
-      INSERT INTO companies (id, market, ticker, name) VALUES ('TW:2330','TW','2330','台積電');
-      INSERT INTO positions (company_id, stage, tier, position_pct) VALUES ('TW:2330','hold','core', 12);
-      INSERT INTO drivers (position_id, name) VALUES (1, 'CoWoS');
-      INSERT INTO interactions (position_id, kind, content) VALUES (1, 'buy', 'first');
-    """)
-    s.commit()
-    s.close()
-    core.set_current_user(1)
-    c = db.connect(old)
-    p = core.get_position(c, "2330")
-    assert p["user_id"] == 1 and p["position_pct"] == 12
-    assert [d["name"] for d in p["drivers"]] == ["CoWoS"]
-    assert p["interactions"][0]["content"] == "first"           # not cascaded away by the rebuild
-    assert p["tier_rule"]["max_pct"] == 20                        # customised rule survived, now owned by user 1
-    assert c.execute("PRAGMA foreign_key_check").fetchall() == []
-    psql = c.execute("SELECT sql FROM sqlite_master WHERE name='positions'").fetchone()[0]
-    assert "UNIQUE (user_id, company_id)" in psql
-
-
 def test_dotenv_parse_and_load(tmp_path, monkeypatch):
     from stockcrm import env
     f = tmp_path / ".env"
@@ -138,3 +95,25 @@ def test_dotenv_parse_and_load(tmp_path, monkeypatch):
     import os
     assert os.environ["STOCKCRM_FACADE_TOKEN"] == "abc 123"
     assert os.environ["STOCKCRM_MULTIUSER"] == "0"      # existing variables win
+
+
+def test_knowledge_proposals_forward_to_engine_in_rest_mode(conn, monkeypatch):
+    from stockcrm import knowledge
+    sent = {}
+
+    def fake_rest(method, path, body, user_id):
+        sent.update(method=method, path=path, body=body, user_id=user_id)
+        return {"id": 77, "status": "pending"}
+
+    monkeypatch.setenv("STOCKCRM_KNOWLEDGE_WRITES", "rest")
+    monkeypatch.setattr(knowledge, "_rest", fake_rest)
+    r = core.create_proposal(conn, "brief", {"company_id": "TW:2330", "kind": "highlights", "content": "- x",
+                                             "sources": [{"title": "t", "url": "u", "date": "2026-11-01"}]}, "why", "agent:t")
+    assert r["queue"] == "engine" and r["id"] == 77
+    assert sent["path"] == "/api/market/knowledge/proposals" and sent["user_id"] == 1
+    assert sent["body"]["kind"] == "brief" and sent["body"]["evidence"][0]["url"] == "u"
+    assert core.list_proposals(conn) == []                     # nothing stored locally
+    # personal scope still stays in the CRM
+    p = core.upsert_position(conn, "TW:2330", "hold", "core")
+    core.create_proposal(conn, "interaction", {"position_id": p["id"], "kind": "news", "content": "y"}, "r", "agent:t")
+    assert len(core.list_proposals(conn)) == 1
