@@ -79,7 +79,7 @@ async def upsert_position(req: Request):
         p = guard(core.upsert_position, c, b["company_id"], b["stage"], b["tier"], b.get("thesis"),
                   b.get("invalidation"), b.get("target_price"), b.get("stop_price"), b.get("position_pct"),
                   b.get("idea_source"), b.get("tags"), b.get("thesis_status"), b.get("target_basis"),
-                  b.get("model_url"))
+                  b.get("model_url"), b.get("shares"), b.get("avg_cost"))
         if b.get("template"):
             guard(core.apply_template, c, p["id"], b["template"])
             p = core.get_position(c, p["id"])
@@ -248,6 +248,21 @@ async def upsert_company(req: Request):
     with conn() as c:
         return guard(core.upsert_company, c, b["market"], b["ticker"], b["name"], b.get("name_en"),
                      b.get("sector"), b.get("notes"))
+
+
+@app.get("/api/companies/{cid}/briefs")
+def briefs(cid: str, kind: str | None = None, limit: int = 20):
+    with conn() as c:
+        return guard(core.list_briefs, c, cid, kind, limit)
+
+
+@app.post("/api/companies/{cid}/briefs")
+async def add_brief(cid: str, req: Request):
+    """Direct write, mainly for profile text. Agents propose highlights via proposals (kind=brief)."""
+    b = await body(req)
+    with conn() as c:
+        return guard(core.add_brief, c, cid, b.get("kind", "profile"), b.get("content", ""), b.get("sources"),
+                     b.get("date"), str(b.get("created_by") or "user"))
 
 
 @app.get("/api/graph")

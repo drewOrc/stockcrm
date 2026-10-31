@@ -7,10 +7,12 @@ Enumerations (closed lists; agents must not invent new values):
   thesis_status: intact | shaken | broken
   interaction.kind:
                  buy | sell | add | trim | news | earnings | call | thought | review
+                 | alert (automatic event from the price engine; always carries price)
   interaction.effect: supports | weakens | confirms   (how it bears on the linked driver/checkpoint)
   reminder.kind: price | earnings | revenue | review | other
   proposal.kind: interaction | edge | thesis_status | reminder
-                 | driver | driver_value | checkpoint | checkpoint_resolve | metric
+                 | driver | driver_value | checkpoint | checkpoint_resolve | metric | brief
+  brief.kind:    profile (what the company does) | highlights (recent developments)
   proposal.status: pending | approved | rejected
   edge.confidence: high | medium | low
   edge.relation: customer (customer buys from supplier) | partner (capacity/licensing partner)
@@ -34,11 +36,12 @@ MARKETS = ("TW", "US")
 STAGES = ("watch", "hold", "exited")
 TIERS = ("core", "satellite", "watch", "blacklist")
 THESIS_STATUSES = ("intact", "shaken", "broken")
-INTERACTION_KINDS = ("buy", "sell", "add", "trim", "news", "earnings", "call", "thought", "review")
+INTERACTION_KINDS = ("buy", "sell", "add", "trim", "news", "earnings", "call", "thought", "review", "alert")
 EFFECTS = ("supports", "weakens", "confirms")
 REMINDER_KINDS = ("price", "earnings", "revenue", "review", "other")
 PROPOSAL_KINDS = ("interaction", "edge", "thesis_status", "reminder",
-                  "driver", "driver_value", "checkpoint", "checkpoint_resolve", "metric")
+                  "driver", "driver_value", "checkpoint", "checkpoint_resolve", "metric", "brief")
+BRIEF_KINDS = ("profile", "highlights")
 PROPOSAL_STATUSES = ("pending", "approved", "rejected")
 CONFIDENCES = ("high", "medium", "low")
 RELATIONS = ("customer", "partner", "holding")
@@ -91,6 +94,8 @@ CREATE TABLE IF NOT EXISTS positions (
   target_basis   TEXT,                 -- how target_price was derived, e.g. "PE 30 × 2027E EPS 48.56"
   stop_price     REAL,
   position_pct   REAL NOT NULL DEFAULT 0,   -- current % of total portfolio, 0..100
+  shares         INTEGER,              -- shares held (null = not tracked)
+  avg_cost       REAL,                 -- average cost per share
   idea_source    TEXT,
   model_url      TEXT,                 -- link/path to the valuation spreadsheet, if any
   tags           TEXT NOT NULL DEFAULT '[]',
@@ -160,7 +165,7 @@ CREATE TABLE IF NOT EXISTS interactions (
   id            INTEGER PRIMARY KEY,
   position_id   INTEGER NOT NULL REFERENCES positions(id) ON DELETE CASCADE,
   ts            TEXT NOT NULL DEFAULT (datetime('now')),   -- UTC ISO
-  kind          TEXT NOT NULL CHECK (kind IN ('buy','sell','add','trim','news','earnings','call','thought','review')),
+  kind          TEXT NOT NULL CHECK (kind IN ('buy','sell','add','trim','news','earnings','call','thought','review','alert')),
   content       TEXT NOT NULL,         -- markdown
   price         REAL,
   behavior_tags TEXT NOT NULL DEFAULT '[]',
@@ -213,6 +218,20 @@ CREATE TABLE IF NOT EXISTS financials_ytd (
   UNIQUE (company_id, year, quarter)
 );
 
+-- AI- or human-written prose about a company. Append-only: every update is a new row, latest wins.
+-- profile = what the company does (stable); highlights = recent developments (dated).
+CREATE TABLE IF NOT EXISTS company_briefs (
+  id         INTEGER PRIMARY KEY,
+  company_id TEXT NOT NULL REFERENCES companies(id),
+  date       TEXT NOT NULL,                -- YYYY-MM-DD the brief is about / was written
+  kind       TEXT NOT NULL CHECK (kind IN ('profile','highlights')),
+  content    TEXT NOT NULL,                -- markdown
+  sources    TEXT NOT NULL DEFAULT '[]',   -- JSON [{title, url, date}]
+  created_by TEXT NOT NULL DEFAULT 'user',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_briefs_company ON company_briefs(company_id, kind, date);
+
 -- Every automated job writes one row here, so "who touched the data and when" is always answerable.
 CREATE TABLE IF NOT EXISTS maintenance_log (
   id      INTEGER PRIMARY KEY,
@@ -247,6 +266,8 @@ _MIGRATIONS = [
     ("edges", "relation", "TEXT NOT NULL DEFAULT 'customer'"),
     ("positions", "target_basis", "TEXT"),
     ("positions", "model_url", "TEXT"),
+    ("positions", "shares", "INTEGER"),
+    ("positions", "avg_cost", "REAL"),
     ("interactions", "driver_id", "INTEGER REFERENCES drivers(id) ON DELETE SET NULL"),
     ("interactions", "checkpoint_id", "INTEGER REFERENCES checkpoints(id) ON DELETE SET NULL"),
     ("interactions", "effect", "TEXT"),
@@ -277,6 +298,29 @@ def _migrate(conn: sqlite3.Connection) -> None:
             DROP TABLE edges_old;
             CREATE INDEX IF NOT EXISTS idx_edges_customer ON edges(customer_id);
             CREATE INDEX IF NOT EXISTS idx_edges_supplier ON edges(supplier_id);
+        """)
+    # interactions.kind CHECK predates 'alert'. checkpoints.interaction_id references this table, so build the
+    # replacement under a temporary name, drop the old one, then rename (renaming the old table first would
+    # drag the foreign key along with it).
+    sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='interactions'").fetchone()
+    if sql and "'review'))" in sql[0] and "'alert'" not in sql[0]:
+        conn.executescript("""
+            CREATE TABLE interactions_new (
+              id INTEGER PRIMARY KEY, position_id INTEGER NOT NULL REFERENCES positions(id) ON DELETE CASCADE,
+              ts TEXT NOT NULL DEFAULT (datetime('now')),
+              kind TEXT NOT NULL CHECK (kind IN ('buy','sell','add','trim','news','earnings','call','thought','review','alert')),
+              content TEXT NOT NULL, price REAL, behavior_tags TEXT NOT NULL DEFAULT '[]', source_url TEXT,
+              driver_id INTEGER REFERENCES drivers(id) ON DELETE SET NULL,
+              checkpoint_id INTEGER REFERENCES checkpoints(id) ON DELETE SET NULL,
+              effect TEXT CHECK (effect IN ('supports','weakens','confirms')),
+              created_by TEXT NOT NULL DEFAULT 'user', created_at TEXT NOT NULL DEFAULT (datetime('now')));
+            INSERT INTO interactions_new (id, position_id, ts, kind, content, price, behavior_tags, source_url, driver_id,
+                                          checkpoint_id, effect, created_by, created_at)
+              SELECT id, position_id, ts, kind, content, price, behavior_tags, source_url, driver_id, checkpoint_id, effect,
+                     created_by, created_at FROM interactions;
+            DROP TABLE interactions;
+            ALTER TABLE interactions_new RENAME TO interactions;
+            CREATE INDEX IF NOT EXISTS idx_interactions_pos ON interactions(position_id, ts);
         """)
     # proposals.kind used to carry a CHECK constraint listing the first four kinds; rebuild if so.
     sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='proposals'").fetchone()

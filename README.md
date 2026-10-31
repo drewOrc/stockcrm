@@ -74,10 +74,10 @@ powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1 -MorningAt
 ### 伺服器常駐
 
 本機的 8765 由 `twstock-tracker/scripts/service_install.ps1` 註冊的工作排程「TWStock CRM」常駐（登入時啟動、當機 5 秒內重啟）。
-不要再手動 `python -m stockcrm.api`，會撞 port；要重啟用：
+不要再手動 `python -m stockcrm.api`，會撞 port；要重啟用引擎提供的腳本（會同時停任務與伺服器，不留孤兒程序）：
 
 ```powershell
-Stop-ScheduledTask 'TWStock CRM'; Start-ScheduledTask 'TWStock CRM'
+powershell -ExecutionPolicy Bypass -File C:\Users\Drew\Desktop\workspace\twstock-tracker\scripts\service_restart.ps1 -Crm
 ```
 
 日誌在 `twstock-tracker/data/logs/crm-supervisor.log`。只在開發或沒裝那個任務的機器上才手動啟動。

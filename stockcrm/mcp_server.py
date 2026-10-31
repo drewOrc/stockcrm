@@ -178,7 +178,7 @@ def log_interaction(position: str, kind: str, content: str, price: float | None 
                     ts: str | None = None, driver_id: int | None = None, checkpoint_id: int | None = None,
                     effect: str | None = None) -> str:
     """Record something the USER told you: a trade or a thought. kind: buy|sell|add|trim|thought|review
-    (news|earnings|call also allowed when the user dictates it). behavior_tags examples:
+    (news|earnings|call also allowed when the user dictates it; alert is reserved for the price engine). behavior_tags examples:
     chasing, averaging_down, revenge, fomo, panic. ts: 'YYYY-MM-DD HH:MM:SS' UTC, default now.
     Link to a driver or checkpoint with effect supports|weakens|confirms when relevant
     (confirms on a checkpoint marks it confirmed). For information you found yourself, use propose_interaction."""
@@ -386,6 +386,58 @@ def propose_checkpoint_resolution(checkpoint_id: int, status: str, rationale: st
     with _conn() as c:
         payload = {"checkpoint_id": checkpoint_id, "status": status, "evidence": evidence}
         return _j(core.create_proposal(c, "checkpoint_resolve", payload, rationale, AGENT))
+
+
+@server.tool()
+def get_company_briefs(company: str, kind: str | None = None, limit: int = 5) -> str:
+    """Written summaries about a company: kind=profile (what it does) or highlights (recent developments),
+    newest first, each with sources. Omit kind for both."""
+    with _conn() as c:
+        return _j(core.list_briefs(c, core.resolve_company(c, company)["id"], kind, limit))
+
+
+@server.tool()
+def set_company_profile(company: str, content: str, sources: list[dict] | None = None) -> str:
+    """Write the company profile (2-4 sentences: what it sells, to whom, how it makes money) when the user asks
+    or when a card has no profile yet. Base it on the annual report's business section or the company site;
+    cite them in sources [{title, url, date}]. Append-only; the newest row is shown."""
+    with _conn() as c:
+        return _j(core.add_brief(c, core.resolve_company(c, company)["id"], "profile", content, sources,
+                                 created_by=AGENT))
+
+
+@server.tool()
+def propose_brief(company: str, content: str, rationale: str, sources: list[dict] | None = None,
+                  kind: str = "highlights", date: str | None = None) -> str:
+    """Propose a 'recent highlights' brief: 3-5 bullet points on what changed lately (results, guidance,
+    orders, management, price action in context), each traceable to sources [{title, url, date}].
+    Numbers and news come from the engine (get_engine_summary) and monthly revenue; your job is the synthesis.
+    The user approves it in the UI."""
+    with _conn() as c:
+        payload = {"company_id": core.resolve_company(c, company)["id"], "kind": kind, "content": content,
+                   "sources": sources or [], "date": date}
+        return _j(core.create_proposal(c, "brief", payload, rationale, AGENT))
+
+
+ENGINE_URL = "http://127.0.0.1:8000"
+
+
+@server.tool()
+def get_engine_summary(code: str) -> str:
+    """Live numbers from the twstock-tracker engine for a Taiwan stock code (e.g. 2330, no market prefix):
+    profile fields, price and returns vs index/sector, moving averages, RSI/KD, institutional flows,
+    margin, sector rank, screener tags, recent alerts and the latest news headlines with links.
+    Returns '引擎離線' when the engine is not running."""
+    import urllib.error
+    import urllib.request
+    url = f"{ENGINE_URL}/api/stocks/{code}/summary"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept": "application/json"}), timeout=15) as r:
+            return r.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        return f"engine returned {e.code} for {url}"
+    except (urllib.error.URLError, TimeoutError) as e:
+        return f"引擎離線（{url}）：{e}"
 
 
 @server.tool()

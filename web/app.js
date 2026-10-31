@@ -5,7 +5,7 @@ const L = {
   stage: { watch: "觀察", hold: "持有", exited: "已出場" },
   tier: { core: "核心", satellite: "衛星", watch: "觀察", blacklist: "黑名單" },
   thesis: { intact: "成立", shaken: "動搖", broken: "失效" },
-  kind: { buy: "買進", sell: "賣出", add: "加碼", trim: "減碼", news: "新聞", earnings: "財報", call: "法說", thought: "想法", review: "回顧" },
+  kind: { buy: "買進", sell: "賣出", add: "加碼", trim: "減碼", news: "新聞", earnings: "財報", call: "法說", thought: "想法", review: "回顧", alert: "警示" },
   rkind: { price: "到價", earnings: "財報", revenue: "營收", review: "回顧", other: "其他" },
   conf: { high: "高", medium: "中", low: "低" },
   pkind: { interaction: "互動紀錄", edge: "供應鏈關係", thesis_status: "論點狀態", reminder: "提醒", driver: "驅動因子", driver_value: "驅動因子數值", checkpoint: "檢查點", checkpoint_resolve: "檢查點結果", metric: "標準指標" },
@@ -54,9 +54,10 @@ function cardHtml(p) {
   return `<div class="card ${p.tier}" data-id="${p.id}">
     <div class="top"><span><span class="name">${esc(p.name)}</span> <span class="ticker">${esc(p.company_id)}</span></span>
       <span>${p.health_issues ? `<span class="badge hi" title="健康度警示">⚠ ${p.health_issues}</span> ` : ""}<span class="badge ${p.tier}">${L.tier[p.tier]}</span></span></div>
+    ${p.latest_brief ? `<div class="brief-line" title="${esc(p.latest_brief.date)}">${esc(p.latest_brief.text)}</div>` : ""}
     <div class="meta">
       <span><i class="dot ${p.thesis_status}"></i>論點${L.thesis[p.thesis_status]}</span>
-      ${p.stage === "hold" ? `<span>部位 ${p.position_pct}%</span>` : ""}
+      ${p.stage === "hold" ? `<span>部位 ${p.position_pct}%${p.shares ? ` · ${p.shares.toLocaleString("en-US")} 股${p.avg_cost ? " @ " + p.avg_cost : ""}` : ""}</span>` : ""}
       <span class="${stale ? "stale" : ""}">${p.days_since_update == null ? "" : p.days_since_update + " 天未更新"}</span>
       <span>${p.interaction_count} 筆紀錄</span>
     </div></div>`;
@@ -128,6 +129,8 @@ function metricsHtml(p) {
       <button class="ghost tiny" style="grid-column:1/-1">儲存指標</button></form>`;
 }
 
+const srcLinks = (sources) => (sources || []).length ? " · 來源：" + sources.map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.url)}</a>${s.date ? " (" + esc(s.date) + ")" : ""}`).join("、") : "";
+
 function renderCard(p) {
   const c = p.concentration;
   const concBadge = c.largest_customer ? `<span class="badge ${{ high: "hi", medium: "mid", low: "lo" }[c.flag]}">最大客戶 ${esc(c.largest_customer_name)} ${pct(c.largest_customer_share)}</span>` : '<span class="kv">尚無客戶資料</span>';
@@ -143,6 +146,14 @@ function renderCard(p) {
     <div class="kv">${esc(p.company.sector || "")} · 想法來源：${esc(p.idea_source || "未填")} · ${p.days_since_update ?? "?"} 天未更新${p.tags?.length ? " · " + p.tags.map(esc).join(", ") : ""}</div>
     <section>${health}</section>
 
+    <section><h4>基本介紹 <span class="kv">公司在做什麼</span></h4>
+      ${p.briefs.profile ? `<div class="brief">${md(p.briefs.profile.content)}<div class="kv">${p.briefs.profile.date} · ${esc(p.briefs.profile.created_by)}${srcLinks(p.briefs.profile.sources)}</div></div>` : '<div class="kv">尚無簡介。在 Claude Code 說「幫我寫 ' + esc(p.company.name) + ' 的公司簡介」，或在下面直接填。</div>'}
+      <form id="form-profile" style="margin-top:6px"><textarea name="content" rows="2" placeholder="兩三句：賣什麼、賣給誰、怎麼賺錢" required></textarea>
+        <div style="margin-top:4px;display:flex;justify-content:flex-end"><button class="ghost tiny">儲存簡介</button></div></form></section>
+
+    <section><h4>最近狀況 <span class="kv">近期重點，agent 每天提案、你核准</span></h4>
+      ${p.briefs.highlights.length ? p.briefs.highlights.map((b) => `<div class="brief"><div class="kv"><b>${b.date}</b> · ${esc(b.created_by)}</div>${md(b.content)}${srcLinks(b.sources) ? `<div class="kv">${srcLinks(b.sources)}</div>` : ""}</div>`).join("") : '<div class="kv">尚無近期重點。早晨排程會自動提案。</div>'}</section>
+
     <section><div class="row3">
       <label>階段<select id="f-stage">${opts(L.stage, p.stage)}</select></label>
       <label>分層<select id="f-tier">${opts(L.tier, p.tier)}</select></label>
@@ -153,6 +164,11 @@ function renderCard(p) {
       <label>目標價<input id="f-target" type="number" step="any" value="${p.target_price ?? ""}"></label>
       <label>停損價<input id="f-stop" type="number" step="any" value="${p.stop_price ?? ""}"></label>
       <label>目標價依據<input id="f-basis" placeholder="PE 30 × 2027E EPS" value="${esc(p.target_basis || "")}"></label>
+    </div>
+    <div class="row3">
+      <label>持有股數<input id="f-shares" type="number" step="1" min="0" value="${p.shares ?? ""}"></label>
+      <label>平均成本<input id="f-cost" type="number" step="any" value="${p.avg_cost ?? ""}"></label>
+      <label>成本金額<input disabled value="${p.shares && p.avg_cost ? Math.round(p.shares * p.avg_cost).toLocaleString("en-US") : ""}"></label>
     </div>
     <label>估值模型檔案<input id="f-model" placeholder="試算表路徑或連結" value="${esc(p.model_url || "")}"></label></section>
 
@@ -221,8 +237,15 @@ function renderCard(p) {
       position_pct: +$("#f-pct").value, thesis: $("#f-thesis").value, invalidation: $("#f-inval").value,
       target_price: $("#f-target").value === "" ? null : +$("#f-target").value,
       stop_price: $("#f-stop").value === "" ? null : +$("#f-stop").value,
-      target_basis: $("#f-basis").value, model_url: $("#f-model").value } });
+      target_basis: $("#f-basis").value, model_url: $("#f-model").value,
+      shares: $("#f-shares").value === "" ? null : +$("#f-shares").value,
+      avg_cost: $("#f-cost").value === "" ? null : +$("#f-cost").value } });
     toast("已儲存"); reload();
+  };
+  $("#form-profile").onsubmit = async (e) => {
+    e.preventDefault(); const f = new FormData(e.target);
+    await api(`/companies/${encodeURIComponent(p.company_id)}/briefs`, { method: "POST", body: { kind: "profile", content: f.get("content") } });
+    toast("簡介已儲存"); reload();
   };
   $("#btn-exposure").onclick = async () => {
     const ex = await api("/exposure/" + encodeURIComponent(p.company_id));
