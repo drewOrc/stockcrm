@@ -5,7 +5,7 @@ const L = {
   stage: { watch: "觀察", hold: "持有", exited: "已出場" },
   tier: { core: "核心", satellite: "衛星", watch: "觀察", blacklist: "黑名單" },
   thesis: { intact: "成立", shaken: "動搖", broken: "失效" },
-  kind: { buy: "買進", sell: "賣出", add: "加碼", trim: "減碼", news: "新聞", earnings: "財報", call: "法說", thought: "想法", review: "回顧" },
+  kind: { buy: "買進", sell: "賣出", add: "加碼", trim: "減碼", news: "新聞", earnings: "財報", call: "法說", thought: "想法", review: "回顧", alert: "警示" },
   rkind: { price: "到價", earnings: "財報", revenue: "營收", review: "回顧", other: "其他" },
   conf: { high: "高", medium: "中", low: "低" },
   pkind: { interaction: "互動紀錄", edge: "供應鏈關係", thesis_status: "論點狀態", reminder: "提醒", driver: "驅動因子", driver_value: "驅動因子數值", checkpoint: "檢查點", checkpoint_resolve: "檢查點結果", metric: "標準指標" },
@@ -57,7 +57,7 @@ function cardHtml(p) {
     ${p.latest_brief ? `<div class="brief-line" title="${esc(p.latest_brief.date)}">${esc(p.latest_brief.text)}</div>` : ""}
     <div class="meta">
       <span><i class="dot ${p.thesis_status}"></i>論點${L.thesis[p.thesis_status]}</span>
-      ${p.stage === "hold" ? `<span>部位 ${p.position_pct}%</span>` : ""}
+      ${p.stage === "hold" ? `<span>部位 ${p.position_pct}%${p.shares ? ` · ${p.shares.toLocaleString("en-US")} 股${p.avg_cost ? " @ " + p.avg_cost : ""}` : ""}</span>` : ""}
       <span class="${stale ? "stale" : ""}">${p.days_since_update == null ? "" : p.days_since_update + " 天未更新"}</span>
       <span>${p.interaction_count} 筆紀錄</span>
     </div></div>`;
@@ -165,6 +165,11 @@ function renderCard(p) {
       <label>停損價<input id="f-stop" type="number" step="any" value="${p.stop_price ?? ""}"></label>
       <label>目標價依據<input id="f-basis" placeholder="PE 30 × 2027E EPS" value="${esc(p.target_basis || "")}"></label>
     </div>
+    <div class="row3">
+      <label>持有股數<input id="f-shares" type="number" step="1" min="0" value="${p.shares ?? ""}"></label>
+      <label>平均成本<input id="f-cost" type="number" step="any" value="${p.avg_cost ?? ""}"></label>
+      <label>成本金額<input disabled value="${p.shares && p.avg_cost ? Math.round(p.shares * p.avg_cost).toLocaleString("en-US") : ""}"></label>
+    </div>
     <label>估值模型檔案<input id="f-model" placeholder="試算表路徑或連結" value="${esc(p.model_url || "")}"></label></section>
 
     <section><h4>投資論點 <span class="seg" id="thesis-seg">${Object.entries(L.thesis).map(([k, v]) => `<button data-s="${k}" class="${k === p.thesis_status ? "on" : ""}">${v}</button>`).join("")}</span></h4>
@@ -232,7 +237,9 @@ function renderCard(p) {
       position_pct: +$("#f-pct").value, thesis: $("#f-thesis").value, invalidation: $("#f-inval").value,
       target_price: $("#f-target").value === "" ? null : +$("#f-target").value,
       stop_price: $("#f-stop").value === "" ? null : +$("#f-stop").value,
-      target_basis: $("#f-basis").value, model_url: $("#f-model").value } });
+      target_basis: $("#f-basis").value, model_url: $("#f-model").value,
+      shares: $("#f-shares").value === "" ? null : +$("#f-shares").value,
+      avg_cost: $("#f-cost").value === "" ? null : +$("#f-cost").value } });
     toast("已儲存"); reload();
   };
   $("#form-profile").onsubmit = async (e) => {

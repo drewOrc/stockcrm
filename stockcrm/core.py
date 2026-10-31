@@ -245,7 +245,7 @@ def get_position(conn, ref: str | int) -> dict | None:
 
 def upsert_position(conn, company_id: str, stage: str, tier: str, thesis=None, invalidation=None,
                     target_price=None, stop_price=None, position_pct=None, idea_source=None, tags=None,
-                    thesis_status=None, target_basis=None, model_url=None) -> dict:
+                    thesis_status=None, target_basis=None, model_url=None, shares=None, avg_cost=None) -> dict:
     _check(stage, db.STAGES, "stage")
     _check(tier, db.TIERS, "tier")
     if thesis_status is not None:
@@ -260,17 +260,18 @@ def upsert_position(conn, company_id: str, stage: str, tier: str, thesis=None, i
                target_price=COALESCE(?,target_price), stop_price=COALESCE(?,stop_price),
                position_pct=COALESCE(?,position_pct), idea_source=COALESCE(?,idea_source),
                tags=COALESCE(?,tags), thesis_status=COALESCE(?,thesis_status),
-               target_basis=COALESCE(?,target_basis), model_url=COALESCE(?,model_url), updated_at=? WHERE id=?""",
+               target_basis=COALESCE(?,target_basis), model_url=COALESCE(?,model_url),
+               shares=COALESCE(?,shares), avg_cost=COALESCE(?,avg_cost), updated_at=? WHERE id=?""",
             (stage, tier, thesis, invalidation, target_price, stop_price, position_pct, idea_source,
              _json_list(tags) if tags is not None else None, thesis_status, target_basis, model_url,
-             _now(), existing["id"]))
+             shares, avg_cost, _now(), existing["id"]))
     else:
         conn.execute(
             """INSERT INTO positions (company_id, stage, tier, thesis, invalidation, target_price, stop_price,
-               position_pct, idea_source, tags, thesis_status, target_basis, model_url)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               position_pct, idea_source, tags, thesis_status, target_basis, model_url, shares, avg_cost)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (company_id, stage, tier, thesis, invalidation, target_price, stop_price, position_pct or 0,
-             idea_source, _json_list(tags), thesis_status or "intact", target_basis, model_url))
+             idea_source, _json_list(tags), thesis_status or "intact", target_basis, model_url, shares, avg_cost))
     conn.commit()
     return get_position(conn, company_id)
 

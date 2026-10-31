@@ -178,7 +178,7 @@ def log_interaction(position: str, kind: str, content: str, price: float | None 
                     ts: str | None = None, driver_id: int | None = None, checkpoint_id: int | None = None,
                     effect: str | None = None) -> str:
     """Record something the USER told you: a trade or a thought. kind: buy|sell|add|trim|thought|review
-    (news|earnings|call also allowed when the user dictates it). behavior_tags examples:
+    (news|earnings|call also allowed when the user dictates it; alert is reserved for the price engine). behavior_tags examples:
     chasing, averaging_down, revenge, fomo, panic. ts: 'YYYY-MM-DD HH:MM:SS' UTC, default now.
     Link to a driver or checkpoint with effect supports|weakens|confirms when relevant
     (confirms on a checkpoint marks it confirmed). For information you found yourself, use propose_interaction."""
