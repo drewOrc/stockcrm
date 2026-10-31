@@ -29,6 +29,9 @@ import os as _os  # noqa: E402
 
 from fastapi.responses import JSONResponse  # noqa: E402
 
+from stockcrm.env import load_dotenv  # noqa: E402
+
+load_dotenv()
 FACADE_TOKEN = _os.environ.get("STOCKCRM_FACADE_TOKEN") or _os.environ.get("CRM_FACADE_TOKEN")
 MULTIUSER = _os.environ.get("STOCKCRM_MULTIUSER", "0") == "1"
 
@@ -50,7 +53,8 @@ async def user_context(req: Request, call_next):
     user_id = _identity_from_headers(req)
     if user_id is None:
         if MULTIUSER and req.url.path.startswith("/api/"):
-            return JSONResponse({"detail": "identity required (X-User-Id + X-Facade-Token via the facade)"}, status_code=401)
+            return JSONResponse({"detail": "identity required: use the unified UI on the engine (http://127.0.0.1:8000); "
+                                           "direct calls need X-User-Id + X-Facade-Token"}, status_code=401)
         user_id = 1
     token = core.CURRENT_USER.set(user_id)
     try:

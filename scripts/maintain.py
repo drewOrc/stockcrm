@@ -24,6 +24,9 @@ from datetime import datetime, timezone
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from stockcrm.env import load_dotenv  # noqa: E402
+
+load_dotenv()
 from stockcrm import core, db, mops  # noqa: E402
 
 REPORTS = db.DB_PATH.parent / "reports"

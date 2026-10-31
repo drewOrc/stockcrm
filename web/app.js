@@ -25,6 +25,7 @@ const opts = (map, sel) => Object.entries(map).map(([k, v]) => `<option value="$
 
 async function api(path, opts = {}) {
   const r = await fetch("/api" + path, { headers: { "Content-Type": "application/json" }, ...opts, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  if (r.status === 401) { toast("多使用者模式已開啟：請改用統一介面 http://127.0.0.1:8000（這個頁面只能經門面存取）"); throw new Error("401"); }
   if (!r.ok) { const t = await r.text(); toast("錯誤：" + t.slice(0, 200)); throw new Error(t); }
   return r.json();
 }

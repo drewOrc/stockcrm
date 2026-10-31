@@ -123,3 +123,18 @@ def test_legacy_single_user_db_migrates_with_references_intact(tmp_path):
     assert c.execute("PRAGMA foreign_key_check").fetchall() == []
     psql = c.execute("SELECT sql FROM sqlite_master WHERE name='positions'").fetchone()[0]
     assert "UNIQUE (user_id, company_id)" in psql
+
+
+def test_dotenv_parse_and_load(tmp_path, monkeypatch):
+    from stockcrm import env
+    f = tmp_path / ".env"
+    f.write_text("# comment\nexport STOCKCRM_FACADE_TOKEN='abc 123'\nSTOCKCRM_MULTIUSER=1 # on\nBAD LINE\nEMPTY=\n",
+                 encoding="utf-8")
+    vals = env.parse_env(f.read_text(encoding="utf-8"))
+    assert vals == {"STOCKCRM_FACADE_TOKEN": "abc 123", "STOCKCRM_MULTIUSER": "1", "EMPTY": ""}
+    monkeypatch.setenv("STOCKCRM_MULTIUSER", "0")
+    monkeypatch.delenv("STOCKCRM_FACADE_TOKEN", raising=False)
+    env.load_dotenv(f)
+    import os
+    assert os.environ["STOCKCRM_FACADE_TOKEN"] == "abc 123"
+    assert os.environ["STOCKCRM_MULTIUSER"] == "0"      # existing variables win
