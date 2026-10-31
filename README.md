@@ -8,8 +8,8 @@
 
 ```bash
 pip install -r requirements.txt
-python seed.py --reset        # 載入示範資料（可略過，從空的開始）
-python -m stockcrm.api        # 開 http://127.0.0.1:8765
+python seed.py --reset        # 建一個獨立的示範資料庫 data/demo.db（不需要引擎）
+STOCKCRM_DB=data/demo.db STOCKCRM_KNOWLEDGE_WRITES=direct python -m stockcrm.api   # 開 http://127.0.0.1:8765
 ```
 
 在這個資料夾啟動 Claude Code，`.mcp.json` 會自動接上 `stockcrm` MCP server（37 個工具），`CLAUDE.md` 告訴 agent 資料模型與寫入規則。試試看：
@@ -47,14 +47,14 @@ python -m stockcrm.api        # 開 http://127.0.0.1:8765
 
 | 資料 | 誰寫 | 怎麼寫 |
 |---|---|---|
-| 官方事實：月營收、季報六個數、股數（證交所／櫃買開放資料，免金鑰） | 腳本 | 直接寫入 `actual`，`created_by=system:mops`，帶來源網址 |
+| 官方事實：月營收、季報六個數、股數（證交所／櫃買開放資料，免金鑰） | 引擎排程 | 寫進 `knowledge_metrics`，`created_by=system:mops`，帶來源 |
 | 需要解讀：法說裡的台數與占比、新聞對檢查點的影響、其他服務的警示 | agent、引擎 | 提案（MCP `propose_*` 或 `POST /api/proposals`），你在網頁核准 |
 | 判斷：論點內容與狀態、模型值、部位、階段、分層、目標價 | 你 | 網頁；agent 可以建議，不能改 |
 
 ## 維護：讓 agent 顧資料庫
 
 ```bash
-python scripts/maintain.py all        # 備份 → 抓月營收／季報／股數 → 品質報告 → 健康度，寫 data/reports/maintenance-日期.md
+python scripts/maintain.py all        # 備份 → 品質報告 → 健康度，寫 data/reports/maintenance-日期.md
 python scripts/maintain.py quality    # 只看資料品質待辦
 ```
 
@@ -68,7 +68,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1 -MorningAt
 ```
 
 - **08:30 StockCRM Morning**：`maintain.py all`，接著用 Claude Code 跑 `scripts/morning_prompt.md`（只允許 stockcrm MCP 工具與網路查詢），簡報寫到 `data/reports/morning-日期.md`。
-- **19:30 StockCRM Evening Fetch**：只抓官方資料（月營收在每月 1 到 10 號收盤後陸續公布）。
+- **19:30 StockCRM Evening Fetch**：現在只做備份與品質檢查（官方資料改由引擎的 MOPS 排程抓）。
 - 找不到 `claude` 指令時會自動用 Claude 桌面版附帶的那份，或用環境變數 `STOCKCRM_CLAUDE` 指定；CLI 要先登入過一次（`claude` 然後 `/login`）。
 
 ### 伺服器常駐
@@ -94,10 +94,12 @@ powershell -ExecutionPolicy Bypass -File C:\Users\Drew\Desktop\workspace\twstock
 
 同一個 workspace 裡的 [`twstock-tracker`](../twstock-tracker) 是台股行情引擎（日 K、技術指標、三大法人、融資券、盤中報價、警示）。兩邊維持獨立的 repo、資料庫與 PR 流程，由引擎伺服一個統一前端：
 
-- 引擎在 :8000 反向代理 `/api/crm/*` → 本服務 `/api/*`，瀏覽器只面對一個 origin，本服務不需要 CORS。
-- **資料歸屬**：卡片、論點、供應鏈、提案在這裡；價格、籌碼、警示、掃描在引擎。彼此不寫對方的資料庫。
+- **一個資料庫，兩個寫入者**：`workspace/data/market.db`。`knowledge_*`（公司、供應鏈邊與權重歷史、簡介、財務實際值）由引擎寫；`personal_*`（卡片、驅動因子、檢查點、互動、提醒、提案、模型值、分層規則）由 CRM 寫；`users` 由引擎的登入系統管。`schema_registry` 記錄每張表誰寫。
+- CRM 讀通用層用 SQL（曝險、對手方、run-rate 都是跨層 join）；寫通用層一律經引擎 `/api/market/knowledge/*`（`stockcrm/knowledge.py`），帶服務金鑰與使用者，引擎檢查管理員身份。
+- 官方資料（月營收、季報 YTD、股數）由引擎的 MOPS 排程抓，CRM 不再抓。
+- 引擎在 :8000 反向代理 `/api/crm/*` → 本服務 `/api/*`，帶 `X-User-Id` 與 `X-Facade-Token`；8765 只綁 127.0.0.1，多使用者模式下缺身份回 401。
+- 從舊的單檔資料庫搬到共用檔：`python scripts/migrate_to_shared.py`（引擎先匯入知識層，腳本只搬個人層）。
 - 引擎要回寫（例如到價警示觸發）一律走 `POST /api/proposals`，`created_by=engine:twstock-tracker`。
-- 之後本服務的 MCP 會直接呼叫引擎的 REST 取得報價與指標，不另接資料源。
 - 公司身份在前端橋接：這裡的 `TW:2330` 對應引擎的 `2330`；美股節點引擎沒有對應。
 
 ## REST API 一覽
@@ -132,14 +134,15 @@ python scripts/check_mcp.py     # MCP server 能用 stdio 啟動並列出工具
 ```
 stockcrm/db.py          schema、列舉值、舊資料庫遷移
 stockcrm/core.py        全部商業邏輯，回傳 dict，REST 與 MCP 共用
-stockcrm/mops.py        證交所／櫃買開放資料解析與寫入
+stockcrm/knowledge.py   通用層寫入（經引擎 REST；測試與獨立模式直接寫表）
+stockcrm/env.py         讀 .env
 stockcrm/mcp_server.py  MCP 工具（stdio）
 stockcrm/api.py         FastAPI + 靜態網頁
 web/                    單頁前端
 scripts/maintain.py     維護總入口；morning.ps1 / install_schedule.ps1 排程；morning_prompt.md agent 早晨任務
 tests/                  pytest
 seed.py                 示範資料
-data/                   stockcrm.db（唯一真相來源）、backups/、reports/；不進 git
+data/                   backups/、reports/、demo.db；正式資料庫在 ../data/market.db；不進 git
 ```
 
 環境變數 `STOCKCRM_DB` 可以改資料庫路徑。

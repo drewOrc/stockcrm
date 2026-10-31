@@ -1,8 +1,15 @@
-"""Seed the database with demo data. Run: python seed.py [--reset]
+"""Seed a STANDALONE demo database (data/demo.db) with demo data. Run: python seed.py [--reset]
+Point STOCKCRM_DB at it to try the CRM without the engine. The real deployment uses the shared market.db.
 
 示範用的供應鏈比重是概略估計，請依年報與法說會資料自行修正。"""
+import os
 import sys
 from pathlib import Path
+
+# The seed builds a standalone database: it creates the engine-owned tables itself and writes knowledge directly.
+os.environ.setdefault("STOCKCRM_BOOTSTRAP_KNOWLEDGE", "1")
+os.environ.setdefault("STOCKCRM_KNOWLEDGE_WRITES", "direct")
+os.environ.setdefault("STOCKCRM_DB", str(Path(__file__).parent / "data" / "demo.db"))
 
 sys.path.insert(0, str(Path(__file__).parent))
 from stockcrm import core, db  # noqa: E402

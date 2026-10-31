@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request  # noqa: E402
 from fastapi.responses import FileResponse, PlainTextResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
-from stockcrm import core, db  # noqa: E402
+from stockcrm import core, db, knowledge  # noqa: E402
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 app = FastAPI(title="Stock CRM", version="0.2")
@@ -72,6 +72,8 @@ def guard(fn, *a, **kw):
         return fn(*a, **kw)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except knowledge.KnowledgeWriteError as e:
+        raise HTTPException(502, str(e))
 
 
 async def body(req: Request) -> dict[str, Any]:
@@ -264,8 +266,8 @@ def apply_checks():
 def maintenance():
     with conn() as c:
         return {"log": core.list_maintenance(c, 30), "quality": core.data_quality_report(c),
-                "last": {j: core.last_run(c, j) for j in ("backup", "fetch_monthly", "fetch_quarterly", "fetch_shares",
-                                                           "quality", "morning")}}
+                "last": {j: core.last_run(c, j) for j in ("backup", "quality", "health", "morning")},
+                "official_data": "fetched by the engine (job_runs: mops_monthly / mops_quarterly / mops_shares)"}
 
 
 @app.post("/api/maintenance/run")
@@ -358,8 +360,15 @@ async def add_edge(req: Request):
 @app.delete("/api/edges/{eid}")
 def delete_edge(eid: int):
     with conn() as c:
-        core.delete_edge(c, eid)
+        guard(core.delete_edge, c, eid)
         return {"ok": True}
+
+
+@app.post("/api/edges/{eid}/weights")
+async def add_edge_weight(eid: int, req: Request):
+    b = await body(req)
+    with conn() as c:
+        return guard(core.add_edge_weight, c, eid, b["date"], b["revenue_share"], b.get("source"))
 
 
 @app.get("/api/relations/{cid}")

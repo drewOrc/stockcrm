@@ -39,7 +39,9 @@ get_thesis_health summarises all three; get_morning_context lists positions need
 
 Rules:
 - Use log_interaction / add_to_watchlist / add_reminder / add_driver / add_checkpoint / set_driver_value /
-  set_metric ONLY for what the user explicitly asked to record or dictated (e.g. model values from their spreadsheet).
+  set_metric(kind=model) ONLY for what the user explicitly asked to record or dictated (e.g. model values from
+  their spreadsheet). Knowledge writes (companies, edges, briefs, actual metrics) go through the engine and need
+  an admin; prefer propose_* unless the user is the admin and asked directly.
 - Anything you infer from external information (news, filings, transcripts, monthly revenue releases) goes
   through propose_*; the user approves it in the web UI. Never change a thesis or position size yourself.
 - When you log or propose an interaction that bears on a driver or checkpoint, link it (driver_id /
@@ -453,39 +455,14 @@ def get_engine_summary(code: str) -> str:
 
 @server.tool()
 def get_maintenance_status() -> str:
-    """Last run of each maintenance job (backup, fetch_monthly, fetch_quarterly, fetch_shares, quality, morning)
+    """Last run of each CRM maintenance job (backup, quality, health, morning)
     and the current data-quality report: edges without source, critical drivers without model values, holdings
     without invalidation or drivers, proposals pending >14 days, stale holdings, overdue checkpoints, TW
     companies whose monthly revenue is not current. Use it to tell the user what needs upkeep."""
     with _conn() as c:
-        return _j({"last": {j: core.last_run(c, j) for j in ("backup", "fetch_monthly", "fetch_quarterly",
-                                                             "fetch_shares", "quality", "morning")},
+        return _j({"last": {j: core.last_run(c, j) for j in ("backup", "quality", "health", "morning")},
+                   "official_data": "fetched by the engine into knowledge_metrics (see get_engine_summary / job_runs)",
                    "quality": core.data_quality_report(c)})
-
-
-@server.tool()
-def fetch_official_data(job: str = "fetch-monthly") -> str:
-    """Pull official facts from TWSE/TPEx open data and write them directly as actuals (created_by system:mops):
-    job = fetch-monthly (monthly revenue for all tracked TW companies, plus previous month and last year's month)
-        | fetch-quarterly (YTD income statement; single-quarter revenue_q/gross_margin/opex/eps derived when the
-          previous quarter is stored) | fetch-shares (shares outstanding, thousands) | backup | quality.
-    Allowed without a proposal because these are sourced facts, not judgments. Needs network."""
-    import sys as _sys
-    scripts = str(Path(__file__).resolve().parent.parent / "scripts")
-    if scripts not in _sys.path:
-        _sys.path.insert(0, scripts)
-    import maintain  # noqa: E402
-    if job not in maintain.JOBS:
-        return f"job must be one of {list(maintain.JOBS)}"
-    key, fn = maintain.JOBS[job]
-    with _conn() as c:
-        try:
-            summary, details = fn(c)
-        except Exception as e:
-            core.log_maintenance(c, key, "error", f"{type(e).__name__}: {e}")
-            return f"error: {type(e).__name__}: {e}"
-        core.log_maintenance(c, key, "ok", summary, details)
-        return _j({"summary": summary, "details": details})
 
 
 @server.tool()
