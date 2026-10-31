@@ -28,6 +28,13 @@
 - `get_thesis_health` 把三者彙整成 issues；`get_morning_context` 的 `attention` 列出需要注意的卡片。
 - 邊有 `relation`：customer（客戶向供應商採購）或 partner（產能或授權夥伴）。
 
+## 使用者與分層
+
+- 個人層（卡片、驅動因子、檢查點、互動、提醒、提案、分層規則）每筆都屬於一個使用者，`users` 表的 id 1 是管理員 Drew。
+- MCP server 從環境變數 `STOCKCRM_USER_ID` 決定自己代表誰（預設 1）；REST 由門面以 `X-User-Id` + `X-Facade-Token` 帶身份。
+- 提案有 `scope`：`knowledge`（供應鏈邊、公司簡介、財務實際值，管理員核准）與 `personal`（本人核准）。
+- 通用層（公司、邊、簡介、財務實際值）之後會與引擎共用同一個資料庫，CRM 對它們只能提案。
+
 ## 寫入規則（最重要）
 
 | 情況 | 用什麼 |

@@ -64,14 +64,21 @@ def job_reset(conn):
 
 
 def job_health(conn):
+    """Thesis health for every user's cards (the personal layer is per user)."""
     out = []
-    for p in core.list_positions(conn):
-        if p["stage"] == "exited":
-            continue
-        h = core.thesis_health(conn, p["id"])
-        if h["issues"]:
-            out.append({"company_id": p["company_id"], "name": p["name"], "thesis_status": p["thesis_status"],
-                        "suggest_shaken": h["suggest_shaken"], "issues": [i["message"] for i in h["issues"]]})
+    for u in core.list_users(conn):
+        token = core.set_current_user(u["id"])
+        try:
+            for p in core.list_positions(conn):
+                if p["stage"] == "exited":
+                    continue
+                h = core.thesis_health(conn, p["id"])
+                if h["issues"]:
+                    out.append({"user": u["username"], "company_id": p["company_id"], "name": p["name"],
+                                "thesis_status": p["thesis_status"], "suggest_shaken": h["suggest_shaken"],
+                                "issues": [i["message"] for i in h["issues"]]})
+        finally:
+            core.CURRENT_USER.reset(token)
     return f"{len(out)} 張卡片需要注意", out
 
 

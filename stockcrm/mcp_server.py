@@ -8,6 +8,7 @@ Tool naming convention:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,8 @@ from mcp.server.mcpserver import MCPServer  # noqa: E402
 from stockcrm import core, db  # noqa: E402
 
 AGENT = "agent:claude-code"
+# Which user's personal layer this MCP server acts on (the facade is not involved here).
+core.set_current_user(int(os.environ.get("STOCKCRM_USER_ID", "1")))
 
 INSTRUCTIONS = """Stock CRM: a supply-chain-aware investment journal. Companies are nodes; edges are
 real customer -> supplier relationships with the customer's share of the supplier's revenue.
