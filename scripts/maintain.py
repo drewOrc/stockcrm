@@ -7,6 +7,7 @@
     python scripts/maintain.py fetch-shares
     python scripts/maintain.py quality
     python scripts/maintain.py health         # list positions whose thesis health suggests attention (no changes)
+    python scripts/maintain.py reset          # DANGER: back up, then delete all data rows (keeps tier_rules and the log)
 
 Every job logs one row in maintenance_log. `all` also writes data/reports/maintenance-YYYY-MM-DD.md.
 Exit code 1 if any job errored, so the scheduler shows it.
@@ -55,6 +56,13 @@ def job_quality(conn):
     return f"資料品質問題 {rep['total']} 項", rep
 
 
+def job_reset(conn):
+    """Irreversible: wipes all data rows (not tier_rules / maintenance_log). Backs up first."""
+    b = core.backup_db(conn)
+    counts = core.reset_data(conn)
+    return f"已備份到 {pathlib.Path(b['path']).name}，清空 {sum(counts.values())} 列", {"backup": b, "deleted": counts}
+
+
 def job_health(conn):
     out = []
     for p in core.list_positions(conn):
@@ -74,6 +82,7 @@ JOBS = {
     "fetch-shares": ("fetch_shares", job_fetch_shares),
     "quality": ("quality", job_quality),
     "health": ("health", job_health),
+    "reset": ("reset", job_reset),      # not part of `all`
 }
 ALL = ["backup", "fetch-monthly", "fetch-quarterly", "fetch-shares", "quality", "health"]
 

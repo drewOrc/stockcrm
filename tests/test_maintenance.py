@@ -109,3 +109,14 @@ def test_maintenance_log(conn):
     assert rows[0]["job"] == "quality" and rows[0]["details"] == {"total": 5}
     assert core.last_run(conn, "quality")["status"] == "ok"
     assert core.last_run(conn, "backup") is None
+
+
+def test_reset_data_keeps_rules_and_log(conn):
+    core.log_maintenance(conn, "quality", "ok", "before")
+    counts = core.reset_data(conn)
+    assert counts["companies"] == 3 and counts["positions"] == 1 and counts["edges"] == 1
+    assert core.search_companies(conn) == [] and core.list_positions(conn) == []
+    assert conn.execute("SELECT COUNT(*) FROM tier_rules").fetchone()[0] == 4
+    jobs = [r["job"] for r in core.list_maintenance(conn)]
+    assert jobs[0] == "reset" and "quality" in jobs
+    core.upsert_company(conn, "TW", "2330", "台積電")  # schema still works after VACUUM

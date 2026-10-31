@@ -1293,3 +1293,29 @@ def rename_company(conn, old_id: str, market: str, ticker: str, name: str | None
     finally:
         conn.execute("PRAGMA foreign_keys = ON")
     return get_company(conn, new_id)
+
+
+DATA_TABLES = ("proposals", "reminders", "interactions", "checkpoints", "driver_values", "drivers",
+               "metrics", "financials_ytd", "positions", "edges", "companies")
+
+
+def reset_data(conn, keep_log: bool = True) -> dict:
+    """Delete every user/agent data row. Keeps the schema, tier_rules and (by default) maintenance_log.
+    Callers must back up first; this is irreversible."""
+    counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in DATA_TABLES}
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN")
+        for t in DATA_TABLES:
+            conn.execute(f"DELETE FROM {t}")
+        if not keep_log:
+            conn.execute("DELETE FROM maintenance_log")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("VACUUM")
+    log_maintenance(conn, "reset", "ok", "資料已清空：" + "，".join(f"{t} {n}" for t, n in counts.items() if n), counts)
+    return counts
