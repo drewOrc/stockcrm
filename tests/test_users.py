@@ -23,6 +23,7 @@ def conn(tmp_path):
 def test_default_admin_and_tier_rules(conn):
     u = core.get_user(conn)
     assert u["id"] == 1 and u["role"] == "admin"
+    assert "password_hash" not in u and "password_hash" not in core.list_users(conn)[0]
     assert len(core.export_graph(conn)["tier_rules"]) == 4
 
 

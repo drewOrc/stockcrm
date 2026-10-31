@@ -30,12 +30,16 @@ def uid() -> int:
     return CURRENT_USER.get()
 
 
+USER_COLS = "id, username, display_name, role, line_user_id, email, disabled, created_at, last_login_at"
+# password_hash belongs to the engine's login and is never read or returned here.
+
+
 def get_user(conn, user_id: int | None = None) -> dict | None:
-    return _row(conn.execute("SELECT * FROM users WHERE id=?", (user_id if user_id is not None else uid(),)))
+    return _row(conn.execute(f"SELECT {USER_COLS} FROM users WHERE id=?", (user_id if user_id is not None else uid(),)))
 
 
 def list_users(conn) -> list[dict]:
-    return _rows(conn.execute("SELECT * FROM users ORDER BY id"))
+    return _rows(conn.execute(f"SELECT {USER_COLS} FROM users ORDER BY id"))
 
 
 def is_admin(conn, user_id: int | None = None) -> bool:
