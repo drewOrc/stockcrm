@@ -553,8 +553,12 @@ def proposal_scope(kind: str, payload: dict) -> str:
 
 
 def create_proposal(conn, kind: str, payload: dict, rationale: str, created_by: str) -> dict:
+    """personal scope: stored here, the owner approves. knowledge scope: forwarded to the engine's single
+    review queue (an admin approves it on the unified UI); kept locally only in direct/standalone mode."""
     _check(kind, db.PROPOSAL_KINDS, "kind")
     _validate_payload(conn, kind, payload)
+    if proposal_scope(kind, payload) == "knowledge" and knowledge.mode() == "rest":
+        return knowledge.propose(conn, uid(), kind, payload, rationale, created_by)
     cur = conn.execute(
         "INSERT INTO personal_proposals (user_id, scope, kind, payload, rationale, created_by) VALUES (?,?,?,?,?,?)",
         (uid(), proposal_scope(kind, payload), kind, json.dumps(payload, ensure_ascii=False), rationale, created_by))

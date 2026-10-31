@@ -95,3 +95,25 @@ def test_dotenv_parse_and_load(tmp_path, monkeypatch):
     import os
     assert os.environ["STOCKCRM_FACADE_TOKEN"] == "abc 123"
     assert os.environ["STOCKCRM_MULTIUSER"] == "0"      # existing variables win
+
+
+def test_knowledge_proposals_forward_to_engine_in_rest_mode(conn, monkeypatch):
+    from stockcrm import knowledge
+    sent = {}
+
+    def fake_rest(method, path, body, user_id):
+        sent.update(method=method, path=path, body=body, user_id=user_id)
+        return {"id": 77, "status": "pending"}
+
+    monkeypatch.setenv("STOCKCRM_KNOWLEDGE_WRITES", "rest")
+    monkeypatch.setattr(knowledge, "_rest", fake_rest)
+    r = core.create_proposal(conn, "brief", {"company_id": "TW:2330", "kind": "highlights", "content": "- x",
+                                             "sources": [{"title": "t", "url": "u", "date": "2026-11-01"}]}, "why", "agent:t")
+    assert r["queue"] == "engine" and r["id"] == 77
+    assert sent["path"] == "/api/market/knowledge/proposals" and sent["user_id"] == 1
+    assert sent["body"]["kind"] == "brief" and sent["body"]["evidence"][0]["url"] == "u"
+    assert core.list_proposals(conn) == []                     # nothing stored locally
+    # personal scope still stays in the CRM
+    p = core.upsert_position(conn, "TW:2330", "hold", "core")
+    core.create_proposal(conn, "interaction", {"position_id": p["id"], "kind": "news", "content": "y"}, "r", "agent:t")
+    assert len(core.list_proposals(conn)) == 1

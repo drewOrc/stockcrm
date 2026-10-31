@@ -203,3 +203,24 @@ def set_metric_actual(conn, user_id: int, company_id: str, metric: str, period: 
         conn.commit()
     return _row(conn.execute("SELECT * FROM knowledge_metrics WHERE company_id=? AND metric=? AND period=?",
                              (company_id, metric, period.upper())))
+
+
+# ---------------------------------------------------------------- proposals (knowledge scope)
+
+ENGINE_PROPOSAL_KINDS = {"edge": "edge", "brief": "brief", "metric": "metric"}
+
+
+def propose(conn, user_id: int, kind: str, payload: dict, rationale: str, created_by: str,
+            evidence: list[dict] | None = None, source: str | None = None, confidence: str | None = None) -> dict:
+    """Send a knowledge-scope proposal to the engine's single review queue (knowledge_proposals).
+    kind: edge | brief | metric. Returns the engine's row (id, status, ...). In direct mode the caller keeps
+    the proposal locally instead (core.create_proposal handles that)."""
+    if kind not in ENGINE_PROPOSAL_KINDS:
+        raise ValueError(f"engine proposals accept {sorted(ENGINE_PROPOSAL_KINDS)}, got {kind!r}")
+    body = {"kind": ENGINE_PROPOSAL_KINDS[kind], "payload": payload, "rationale": rationale,
+            "evidence": evidence or payload.get("sources") or [], "source": source or payload.get("source"),
+            "confidence": confidence or payload.get("confidence"), "created_by": created_by}
+    r = _rest("POST", "/api/market/knowledge/proposals", body, user_id)
+    return {"id": r.get("id"), "scope": "knowledge", "queue": "engine", "status": r.get("status", "pending"),
+            "kind": kind, "payload": payload, "rationale": rationale, "created_by": created_by,
+            "engine_response": r}

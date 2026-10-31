@@ -32,7 +32,7 @@
 
 - 個人層（卡片、驅動因子、檢查點、互動、提醒、提案、分層規則）每筆都屬於一個使用者，`users` 表的 id 1 是管理員 Drew。
 - MCP server 從環境變數 `STOCKCRM_USER_ID` 決定自己代表誰（預設 1）；REST 由門面以 `X-User-Id` + `X-Facade-Token` 帶身份。
-- 提案有 `scope`：`knowledge`（供應鏈邊、公司簡介、財務實際值，管理員核准）與 `personal`（本人核准）。
+- 提案有 `scope`：`personal`（互動、論點狀態、驅動因子、檢查點、提醒、模型值，本人核准，存在 CRM）與 `knowledge`（供應鏈邊、公司簡介、財務實際值）。knowledge 提案會轉送引擎的單一審核佇列 `knowledge_proposals`，管理員在統一介面「知識層」頁核准；CRM 的提案頁看不到它們。
 - **共用資料庫**：`C:\Users\Drew\Desktop\workspace\data\market.db`，與引擎共用。`knowledge_*`（公司、邊、簡介、財務實際值）由引擎寫，
   CRM 只讀；CRM 要寫通用層一律經引擎的 `/api/market/knowledge/*`（`stockcrm/knowledge.py`，帶服務金鑰與目前使用者，需管理員）。
   `personal_*` 由 CRM 寫。`schema_registry` 可查每張表誰寫。

@@ -43,7 +43,10 @@ Rules:
   their spreadsheet). Knowledge writes (companies, edges, briefs, actual metrics) go through the engine and need
   an admin; prefer propose_* unless the user is the admin and asked directly.
 - Anything you infer from external information (news, filings, transcripts, monthly revenue releases) goes
-  through propose_*; the user approves it in the web UI. Never change a thesis or position size yourself.
+  through propose_*. Personal-scope proposals (interactions, thesis status, drivers, checkpoints, reminders,
+  model values) wait in the CRM for the card's owner; knowledge-scope ones (edges, briefs, actual metrics) go to
+  the engine's shared review queue and an admin approves them on the unified UI. Never change a thesis or
+  position size yourself.
 - When you log or propose an interaction that bears on a driver or checkpoint, link it (driver_id /
   checkpoint_id) and set effect: supports | weakens | confirms. That is how evidence accumulates.
 - Company ids are MARKET:TICKER, e.g. TW:2330, US:NVDA. Most tools also accept a bare ticker or name.
