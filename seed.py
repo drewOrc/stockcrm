@@ -152,13 +152,13 @@ core.set_driver_value(conn, wd[0]["id"], "2026Q3", "actual", 20, "Meta 法說")
 core.add_interaction(conn, wiwynn["id"], "call", "Meta 法說：2026 資本支出年增約 20%，低於市場預期的 30%。",
                      driver_id=wd[0]["id"], effect="weakens", ts="2026-10-29 21:00:00")
 
-# 轉型股示範：用朋友模型裡的數字（公司代號請自行確認後修改）
-core.upsert_company(conn, "TW", "KECHIAO", "科嶠（示範，代號待確認）", "Ke Chiao", "PCB 設備轉半導體設備")
+# 轉型股示範：用朋友模型裡的數字（科嶠 4542，櫃買）
+core.upsert_company(conn, "TW", "4542", "科嶠（示範）", "Koyo Industrial", "PCB 設備轉半導體設備")
 core.upsert_company(conn, "US", "BROOKS", "Brooks（夥伴）", "Brooks Automation", "半導體自動化")
-core.add_edge(conn, "US:BROOKS", "TW:KECHIAO", 0.50, 90, "low", "模型假設：2027 Brooks 160 台貢獻約半數 SEMI 營收",
+core.add_edge(conn, "US:BROOKS", "TW:4542", 0.50, 90, "low", "模型假設：2027 Brooks 160 台貢獻約半數 SEMI 營收",
               relation="partner")
 kc = core.upsert_position(
-    conn, "TW:KECHIAO", "watch", "watch",
+    conn, "TW:4542", "watch", "watch",
     thesis="從 PCB 烤箱廠轉型，靠晶圓 FOUP 清洗設備加上 Brooks 的產能與授權金，2027 年 SEMI 占營收七成。",
     invalidation="2026 下半年前看不到 Brooks 產線與客戶認證的公開證據；或自製設備 2026 出貨不到 2 台。",
     target_price=1457, target_basis="PE 30 × 2027E EPS 48.56", idea_source="朋友的模型",
@@ -177,15 +177,15 @@ core.add_checkpoint(conn, kc["id"], "Brooks 合作條件公開揭露", "2026-09-
 core.add_checkpoint(conn, kc["id"], "晶圓廠客戶認證通過", "2026-12-31", "重訊、法說或客戶公告", d1["id"])
 core.add_checkpoint(conn, kc["id"], "自製設備首批出貨（2 台）", "2026-12-31", "月營收跳升或出貨公告", d1["id"])
 core.add_checkpoint(conn, kc["id"], "授權金首次入帳", "2026-11-14", "3Q26 季報其他營收或業外，USD 4M", d2["id"])
-core.set_metric(conn, "TW:KECHIAO", "revenue_q", "2026Q2", "model", 390_667, "模型：4、5 月實際加 6 月自估")
-core.set_metric(conn, "TW:KECHIAO", "revenue_m", "2026-04", "actual", 108_121, "公開資訊觀測站")
-core.set_metric(conn, "TW:KECHIAO", "revenue_m", "2026-05", "actual", 132_546, "公開資訊觀測站")
-core.set_metric(conn, "TW:KECHIAO", "eps", "2025", "actual", 1.28)
-core.set_metric(conn, "TW:KECHIAO", "eps", "2026", "model", 3.82)
-core.set_metric(conn, "TW:KECHIAO", "eps", "2027", "model", 48.56)
-core.set_metric(conn, "TW:KECHIAO", "gross_margin", "2025", "actual", 0.352)
-core.set_metric(conn, "TW:KECHIAO", "gross_margin", "2026", "model", 0.474)
-core.set_metric(conn, "TW:KECHIAO", "shares", "2026", "model", 33_290)
+core.set_metric(conn, "TW:4542", "revenue_q", "2026Q2", "model", 390_667, "模型：4、5 月實際加 6 月自估")
+core.set_metric(conn, "TW:4542", "revenue_m", "2026-04", "actual", 108_121, "公開資訊觀測站")
+core.set_metric(conn, "TW:4542", "revenue_m", "2026-05", "actual", 132_546, "公開資訊觀測站")
+core.set_metric(conn, "TW:4542", "eps", "2025", "actual", 1.28)
+core.set_metric(conn, "TW:4542", "eps", "2026", "model", 3.82)
+core.set_metric(conn, "TW:4542", "eps", "2027", "model", 48.56)
+core.set_metric(conn, "TW:4542", "gross_margin", "2025", "actual", 0.352)
+core.set_metric(conn, "TW:4542", "gross_margin", "2026", "model", 0.474)
+core.set_metric(conn, "TW:4542", "shares", "2026", "model", 33_290)
 core.create_proposal(
     conn, "checkpoint_resolve",
     {"checkpoint_id": core.list_checkpoints(conn, kc["id"])[0]["id"], "status": "missed",

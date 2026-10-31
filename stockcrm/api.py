@@ -79,7 +79,7 @@ async def upsert_position(req: Request):
         p = guard(core.upsert_position, c, b["company_id"], b["stage"], b["tier"], b.get("thesis"),
                   b.get("invalidation"), b.get("target_price"), b.get("stop_price"), b.get("position_pct"),
                   b.get("idea_source"), b.get("tags"), b.get("thesis_status"), b.get("target_basis"),
-                  b.get("model_url"))
+                  b.get("model_url"), b.get("shares"), b.get("avg_cost"))
         if b.get("template"):
             guard(core.apply_template, c, p["id"], b["template"])
             p = core.get_position(c, p["id"])
@@ -190,6 +190,38 @@ def apply_checks():
         return core.apply_health_flags(c)
 
 
+# ---- maintenance
+@app.get("/api/maintenance")
+def maintenance():
+    with conn() as c:
+        return {"log": core.list_maintenance(c, 30), "quality": core.data_quality_report(c),
+                "last": {j: core.last_run(c, j) for j in ("backup", "fetch_monthly", "fetch_quarterly", "fetch_shares",
+                                                           "quality", "morning")}}
+
+
+@app.post("/api/maintenance/run")
+async def maintenance_run(req: Request):
+    """Run one maintenance job now (the same code the scheduler runs)."""
+    import sys as _sys
+    scripts = Path(__file__).resolve().parent.parent / "scripts"
+    if str(scripts) not in _sys.path:
+        _sys.path.insert(0, str(scripts))
+    import maintain  # noqa: E402  (scripts/maintain.py)
+    b = await body(req)
+    job = b.get("job")
+    if job not in maintain.JOBS:
+        raise HTTPException(400, f"job must be one of {list(maintain.JOBS)}")
+    key, fn = maintain.JOBS[job]
+    with conn() as c:
+        try:
+            summary, details = fn(c)
+        except Exception as e:
+            core.log_maintenance(c, key, "error", f"{type(e).__name__}: {e}")
+            raise HTTPException(502, f"{type(e).__name__}: {e}")
+        core.log_maintenance(c, key, "ok", summary, details)
+        return {"job": job, "summary": summary, "details": details}
+
+
 @app.post("/api/positions/{pid}/thesis_status")
 async def thesis_status(pid: int, req: Request):
     b = await body(req)
@@ -216,6 +248,21 @@ async def upsert_company(req: Request):
     with conn() as c:
         return guard(core.upsert_company, c, b["market"], b["ticker"], b["name"], b.get("name_en"),
                      b.get("sector"), b.get("notes"))
+
+
+@app.get("/api/companies/{cid}/briefs")
+def briefs(cid: str, kind: str | None = None, limit: int = 20):
+    with conn() as c:
+        return guard(core.list_briefs, c, cid, kind, limit)
+
+
+@app.post("/api/companies/{cid}/briefs")
+async def add_brief(cid: str, req: Request):
+    """Direct write, mainly for profile text. Agents propose highlights via proposals (kind=brief)."""
+    b = await body(req)
+    with conn() as c:
+        return guard(core.add_brief, c, cid, b.get("kind", "profile"), b.get("content", ""), b.get("sources"),
+                     b.get("date"), str(b.get("created_by") or "user"))
 
 
 @app.get("/api/graph")
@@ -275,6 +322,22 @@ def morning():
 def proposals(status: str = "pending"):
     with conn() as c:
         return core.list_proposals(c, None if status == "all" else status)
+
+
+@app.post("/api/proposals")
+async def create_proposal(req: Request):
+    """For other local services (e.g. the twstock-tracker engine) to propose changes instead of
+    writing CRM tables directly. body: {kind, payload, rationale, created_by}. Same shape as list_proposals rows."""
+    b = await body(req)
+    for k in ("kind", "payload", "rationale", "created_by"):
+        if k not in b or b[k] in (None, ""):
+            raise HTTPException(400, f"missing {k}")
+    if not isinstance(b["payload"], dict):
+        raise HTTPException(400, "payload must be an object")
+    with conn() as c:
+        pr = guard(core.create_proposal, c, b["kind"], b["payload"], b["rationale"], str(b["created_by"]))
+        pr["summary"] = core._proposal_summary(c, pr)
+        return pr
 
 
 @app.post("/api/proposals/{pid}/decide")

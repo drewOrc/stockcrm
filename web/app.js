@@ -5,7 +5,7 @@ const L = {
   stage: { watch: "觀察", hold: "持有", exited: "已出場" },
   tier: { core: "核心", satellite: "衛星", watch: "觀察", blacklist: "黑名單" },
   thesis: { intact: "成立", shaken: "動搖", broken: "失效" },
-  kind: { buy: "買進", sell: "賣出", add: "加碼", trim: "減碼", news: "新聞", earnings: "財報", call: "法說", thought: "想法", review: "回顧" },
+  kind: { buy: "買進", sell: "賣出", add: "加碼", trim: "減碼", news: "新聞", earnings: "財報", call: "法說", thought: "想法", review: "回顧", alert: "警示" },
   rkind: { price: "到價", earnings: "財報", revenue: "營收", review: "回顧", other: "其他" },
   conf: { high: "高", medium: "中", low: "低" },
   pkind: { interaction: "互動紀錄", edge: "供應鏈關係", thesis_status: "論點狀態", reminder: "提醒", driver: "驅動因子", driver_value: "驅動因子數值", checkpoint: "檢查點", checkpoint_resolve: "檢查點結果", metric: "標準指標" },
@@ -13,7 +13,7 @@ const L = {
   signal: { no_data: "無資料", on_track: "符合", ahead: "超前", behind: "落後", weakened: "被削弱" },
   cstatus: { pending: "待確認", confirmed: "已確認", missed: "未達成" },
   metric: { revenue_m: "月營收", revenue_q: "季營收", gross_margin: "毛利率", opex: "營業費用", eps: "EPS", shares: "股數" },
-  relation: { customer: "客戶", partner: "夥伴" },
+  relation: { customer: "客戶", partner: "夥伴", holding: "成分股" },
 };
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const pct = (v) => v == null ? "?" : Math.round(v * 100) + "%";
@@ -54,9 +54,10 @@ function cardHtml(p) {
   return `<div class="card ${p.tier}" data-id="${p.id}">
     <div class="top"><span><span class="name">${esc(p.name)}</span> <span class="ticker">${esc(p.company_id)}</span></span>
       <span>${p.health_issues ? `<span class="badge hi" title="健康度警示">⚠ ${p.health_issues}</span> ` : ""}<span class="badge ${p.tier}">${L.tier[p.tier]}</span></span></div>
+    ${p.latest_brief ? `<div class="brief-line" title="${esc(p.latest_brief.date)}">${esc(p.latest_brief.text)}</div>` : ""}
     <div class="meta">
       <span><i class="dot ${p.thesis_status}"></i>論點${L.thesis[p.thesis_status]}</span>
-      ${p.stage === "hold" ? `<span>部位 ${p.position_pct}%</span>` : ""}
+      ${p.stage === "hold" ? `<span>部位 ${p.position_pct}%${p.shares ? ` · ${p.shares.toLocaleString("en-US")} 股${p.avg_cost ? " @ " + p.avg_cost : ""}` : ""}</span>` : ""}
       <span class="${stale ? "stale" : ""}">${p.days_since_update == null ? "" : p.days_since_update + " 天未更新"}</span>
       <span>${p.interaction_count} 筆紀錄</span>
     </div></div>`;
@@ -128,11 +129,13 @@ function metricsHtml(p) {
       <button class="ghost tiny" style="grid-column:1/-1">儲存指標</button></form>`;
 }
 
+const srcLinks = (sources) => (sources || []).length ? " · 來源：" + sources.map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.url)}</a>${s.date ? " (" + esc(s.date) + ")" : ""}`).join("、") : "";
+
 function renderCard(p) {
   const c = p.concentration;
   const concBadge = c.largest_customer ? `<span class="badge ${{ high: "hi", medium: "mid", low: "lo" }[c.flag]}">最大客戶 ${esc(c.largest_customer_name)} ${pct(c.largest_customer_share)}</span>` : '<span class="kv">尚無客戶資料</span>';
   const rel = (list, key, nameKey, dir) => list.length ? list.map((e) => `
-      <div class="rel"><span>${e.relation === "partner" ? "夥伴" : dir} <a data-open="${e[key]}">${esc(e[nameKey])}</a> <span class="kv">${e[key]}</span></span>
+      <div class="rel"><span>${e.relation === "partner" ? "夥伴" : e.relation === "holding" ? (dir === "客戶" ? "成分股" : "被持有於") : dir} <a data-open="${e[key]}">${esc(e[nameKey])}</a> <span class="kv">${e[key]}</span></span>
         <span class="kv">${pct(e.revenue_share)} · ${e.lag_days ?? "?"} 天 · 信心${L.conf[e.confidence]}</span></div>`).join("") : '<div class="kv">無</div>';
   const linkOpts = `<option value="">不關聯</option>${p.drivers.map((d) => `<option value="d:${d.id}">驅動：${esc(d.name)}</option>`).join("")}${p.checkpoints.filter((k) => k.status === "pending").map((k) => `<option value="c:${k.id}">檢查點：${esc(k.title)}</option>`).join("")}`;
   const health = p.health.issues.length ? `<div class="warn-box"><b>健康度警示</b><ul class="issues">${p.health.issues.map((i) => `<li class="${i.severity}">${esc(i.message)}</li>`).join("")}</ul>${p.health.suggest_shaken ? '<div class="kv">有高嚴重度問題而論點仍標成立。建議改為動搖，或處理上面的項目。</div>' : ""}</div>` : '<div class="ok-box">健康度正常：沒有逾期檢查點、落後的驅動因子或偏離的指標。</div>';
@@ -142,6 +145,14 @@ function renderCard(p) {
     <h2>${esc(p.company.name)} <span class="ticker">${esc(p.company_id)}</span> <span class="badge ${p.tier}">${L.tier[p.tier]}</span></h2>
     <div class="kv">${esc(p.company.sector || "")} · 想法來源：${esc(p.idea_source || "未填")} · ${p.days_since_update ?? "?"} 天未更新${p.tags?.length ? " · " + p.tags.map(esc).join(", ") : ""}</div>
     <section>${health}</section>
+
+    <section><h4>基本介紹 <span class="kv">公司在做什麼</span></h4>
+      ${p.briefs.profile ? `<div class="brief">${md(p.briefs.profile.content)}<div class="kv">${p.briefs.profile.date} · ${esc(p.briefs.profile.created_by)}${srcLinks(p.briefs.profile.sources)}</div></div>` : '<div class="kv">尚無簡介。在 Claude Code 說「幫我寫 ' + esc(p.company.name) + ' 的公司簡介」，或在下面直接填。</div>'}
+      <form id="form-profile" style="margin-top:6px"><textarea name="content" rows="2" placeholder="兩三句：賣什麼、賣給誰、怎麼賺錢" required></textarea>
+        <div style="margin-top:4px;display:flex;justify-content:flex-end"><button class="ghost tiny">儲存簡介</button></div></form></section>
+
+    <section><h4>最近狀況 <span class="kv">近期重點，agent 每天提案、你核准</span></h4>
+      ${p.briefs.highlights.length ? p.briefs.highlights.map((b) => `<div class="brief"><div class="kv"><b>${b.date}</b> · ${esc(b.created_by)}</div>${md(b.content)}${srcLinks(b.sources) ? `<div class="kv">${srcLinks(b.sources)}</div>` : ""}</div>`).join("") : '<div class="kv">尚無近期重點。早晨排程會自動提案。</div>'}</section>
 
     <section><div class="row3">
       <label>階段<select id="f-stage">${opts(L.stage, p.stage)}</select></label>
@@ -153,6 +164,11 @@ function renderCard(p) {
       <label>目標價<input id="f-target" type="number" step="any" value="${p.target_price ?? ""}"></label>
       <label>停損價<input id="f-stop" type="number" step="any" value="${p.stop_price ?? ""}"></label>
       <label>目標價依據<input id="f-basis" placeholder="PE 30 × 2027E EPS" value="${esc(p.target_basis || "")}"></label>
+    </div>
+    <div class="row3">
+      <label>持有股數<input id="f-shares" type="number" step="1" min="0" value="${p.shares ?? ""}"></label>
+      <label>平均成本<input id="f-cost" type="number" step="any" value="${p.avg_cost ?? ""}"></label>
+      <label>成本金額<input disabled value="${p.shares && p.avg_cost ? Math.round(p.shares * p.avg_cost).toLocaleString("en-US") : ""}"></label>
     </div>
     <label>估值模型檔案<input id="f-model" placeholder="試算表路徑或連結" value="${esc(p.model_url || "")}"></label></section>
 
@@ -221,8 +237,15 @@ function renderCard(p) {
       position_pct: +$("#f-pct").value, thesis: $("#f-thesis").value, invalidation: $("#f-inval").value,
       target_price: $("#f-target").value === "" ? null : +$("#f-target").value,
       stop_price: $("#f-stop").value === "" ? null : +$("#f-stop").value,
-      target_basis: $("#f-basis").value, model_url: $("#f-model").value } });
+      target_basis: $("#f-basis").value, model_url: $("#f-model").value,
+      shares: $("#f-shares").value === "" ? null : +$("#f-shares").value,
+      avg_cost: $("#f-cost").value === "" ? null : +$("#f-cost").value } });
     toast("已儲存"); reload();
+  };
+  $("#form-profile").onsubmit = async (e) => {
+    e.preventDefault(); const f = new FormData(e.target);
+    await api(`/companies/${encodeURIComponent(p.company_id)}/briefs`, { method: "POST", body: { kind: "profile", content: f.get("content") } });
+    toast("簡介已儲存"); reload();
   };
   $("#btn-exposure").onclick = async () => {
     const ex = await api("/exposure/" + encodeURIComponent(p.company_id));
@@ -406,15 +429,39 @@ async function loadMorning() {
         <div class="kv" style="margin-top:10px">${m.tw_monthly_revenue_window ? "現在是台股月營收公布期間（1 到 10 號）。" : "台股月營收公布期間是每月 1 到 10 號。"} 待審提案 ${m.pending_proposals} 件。</div>
       </div>
       <div class="panel"><h3>交給 agent 的早晨任務</h3>
-        <div class="kv" style="margin-bottom:6px">在 Claude Code 裡貼上這段，它會透過 MCP 讀取同一份資料並提案：</div>
+        <div class="kv" style="margin-bottom:6px">排程每天會自動跑一次（scripts/morning.ps1）。要手動跑，在 Claude Code 裡貼上這段：</div>
         <pre class="prompt" id="prompt-text">${esc(prompt)}</pre>
         <button class="ghost tiny" id="btn-copy">複製</button>
       </div>
+      <div class="panel" id="maint-panel"><h3>維護狀態</h3><div class="kv">載入中…</div></div>
     </div>`;
   $("#btn-copy").onclick = () => navigator.clipboard.writeText($("#prompt-text").textContent).then(() => toast("已複製"));
+  loadMaintenance();
   $$("#morning [data-open]").forEach((a) => a.onclick = () => openCard(a.dataset.open));
   const af = $("#btn-apply-flags");
   if (af) af.onclick = async () => { const r = await api("/checks/apply", { method: "POST" }); toast(`已將 ${r.length} 張卡片標為動搖`); loadMorning(); loadBoard(); };
+}
+
+/* ---------------- maintenance */
+const JOB_L = { backup: "備份", fetch_monthly: "月營收", fetch_quarterly: "季報", fetch_shares: "股數", quality: "品質檢查", morning: "早晨簡報", health: "健康度" };
+const Q_L = { edges_without_source: "沒有來源的供應鏈關係", critical_drivers_without_model: "沒有模型值的關鍵驅動因子", holdings_without_invalidation: "沒有失效條件的持股", holdings_without_drivers: "沒有驅動因子的持股", proposals_pending_too_long: "放超過兩週沒批的提案", stale_holdings: "超過 30 天沒更新的持股", overdue_checkpoints: "逾期檢查點", tw_companies_missing_recent_revenue: "月營收不是最新的台股公司" };
+async function loadMaintenance() {
+  const el = $("#maint-panel");
+  if (!el) return;
+  const m = await api("/maintenance");
+  const last = Object.entries(m.last).map(([j, r]) => `<div class="rel"><span>${JOB_L[j] || j}</span><span class="kv">${r ? `<span class="status ${r.status === "ok" ? "approved" : r.status === "error" ? "rejected" : ""}">${r.status}</span> ${tpe(r.ts)} · ${esc(r.summary)}` : "還沒跑過"}</span></div>`).join("");
+  const q = Object.entries(Q_L).filter(([k]) => (m.quality[k] || []).length).map(([k, label]) => `<details><summary>${label}（${m.quality[k].length}）</summary><ul class="issues">${m.quality[k].map((it) => `<li class="low">${esc(Object.entries(it).filter(([, v]) => v != null).map(([kk, v]) => `${kk}=${v}`).join("，"))}</li>`).join("")}</ul></details>`).join("");
+  el.innerHTML = `<h3>維護狀態 <span class="kv">腳本直接寫入官方事實（system:mops），其餘走提案</span></h3>
+    ${last}
+    <div style="margin:10px 0 6px;display:flex;gap:6px;flex-wrap:wrap">
+      <button class="ghost tiny" data-job="fetch-monthly">抓月營收</button><button class="ghost tiny" data-job="fetch-quarterly">抓季報</button>
+      <button class="ghost tiny" data-job="fetch-shares">抓股數</button><button class="ghost tiny" data-job="backup">備份</button><button class="ghost tiny" data-job="quality">品質檢查</button>
+    </div>
+    <div><b>資料品質（${m.quality.total}）</b>${q || '<div class="kv">沒有問題。</div>'}</div>`;
+  $$("#maint-panel [data-job]").forEach((b) => b.onclick = async () => {
+    b.disabled = true; b.textContent = "執行中…";
+    try { const r = await api("/maintenance/run", { method: "POST", body: { job: b.dataset.job } }); toast(r.summary); } finally { loadMaintenance(); }
+  });
 }
 
 /* ---------------- proposals */

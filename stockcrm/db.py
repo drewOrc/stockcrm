@@ -7,13 +7,17 @@ Enumerations (closed lists; agents must not invent new values):
   thesis_status: intact | shaken | broken
   interaction.kind:
                  buy | sell | add | trim | news | earnings | call | thought | review
+                 | alert (automatic event from the price engine; always carries price)
   interaction.effect: supports | weakens | confirms   (how it bears on the linked driver/checkpoint)
   reminder.kind: price | earnings | revenue | review | other
   proposal.kind: interaction | edge | thesis_status | reminder
-                 | driver | driver_value | checkpoint | checkpoint_resolve | metric
+                 | driver | driver_value | checkpoint | checkpoint_resolve | metric | brief
+  brief.kind:    profile (what the company does) | highlights (recent developments)
   proposal.status: pending | approved | rejected
   edge.confidence: high | medium | low
   edge.relation: customer (customer buys from supplier) | partner (capacity/licensing partner)
+                 | holding (customer_id = constituent stock, supplier_id = the ETF/fund that holds it;
+                   revenue_share = weight of the constituent in the fund)
   value.kind:    model | actual
   checkpoint.status: pending | confirmed | missed
   metric:        revenue_m | revenue_q | gross_margin | opex | eps | shares
@@ -32,14 +36,15 @@ MARKETS = ("TW", "US")
 STAGES = ("watch", "hold", "exited")
 TIERS = ("core", "satellite", "watch", "blacklist")
 THESIS_STATUSES = ("intact", "shaken", "broken")
-INTERACTION_KINDS = ("buy", "sell", "add", "trim", "news", "earnings", "call", "thought", "review")
+INTERACTION_KINDS = ("buy", "sell", "add", "trim", "news", "earnings", "call", "thought", "review", "alert")
 EFFECTS = ("supports", "weakens", "confirms")
 REMINDER_KINDS = ("price", "earnings", "revenue", "review", "other")
 PROPOSAL_KINDS = ("interaction", "edge", "thesis_status", "reminder",
-                  "driver", "driver_value", "checkpoint", "checkpoint_resolve", "metric")
+                  "driver", "driver_value", "checkpoint", "checkpoint_resolve", "metric", "brief")
+BRIEF_KINDS = ("profile", "highlights")
 PROPOSAL_STATUSES = ("pending", "approved", "rejected")
 CONFIDENCES = ("high", "medium", "low")
-RELATIONS = ("customer", "partner")
+RELATIONS = ("customer", "partner", "holding")
 VALUE_KINDS = ("model", "actual")
 CHECKPOINT_STATUSES = ("pending", "confirmed", "missed")
 METRICS = ("revenue_m", "revenue_q", "gross_margin", "opex", "eps", "shares")
@@ -60,6 +65,7 @@ CREATE TABLE IF NOT EXISTS companies (
 
 -- Directed relationship. relation='customer': customer buys from supplier.
 -- relation='partner': capacity / licensing partner (customer_id = the partner, supplier_id = our company).
+-- relation='holding': customer_id = constituent stock, supplier_id = the fund; revenue_share = weight in fund.
 CREATE TABLE IF NOT EXISTS edges (
   id            INTEGER PRIMARY KEY,
   customer_id   TEXT NOT NULL REFERENCES companies(id),
@@ -67,7 +73,7 @@ CREATE TABLE IF NOT EXISTS edges (
   revenue_share REAL,                  -- share of SUPPLIER revenue that comes from CUSTOMER, 0..1, nullable if unknown
   lag_days      INTEGER,               -- typical delay from customer news to supplier revenue impact
   confidence    TEXT NOT NULL DEFAULT 'medium' CHECK (confidence IN ('high','medium','low')),
-  relation      TEXT NOT NULL DEFAULT 'customer' CHECK (relation IN ('customer','partner')),
+  relation      TEXT NOT NULL DEFAULT 'customer' CHECK (relation IN ('customer','partner','holding')),
   source        TEXT,
   notes         TEXT,
   created_by    TEXT NOT NULL DEFAULT 'user',
@@ -88,6 +94,8 @@ CREATE TABLE IF NOT EXISTS positions (
   target_basis   TEXT,                 -- how target_price was derived, e.g. "PE 30 × 2027E EPS 48.56"
   stop_price     REAL,
   position_pct   REAL NOT NULL DEFAULT 0,   -- current % of total portfolio, 0..100
+  shares         INTEGER,              -- shares held (null = not tracked)
+  avg_cost       REAL,                 -- average cost per share
   idea_source    TEXT,
   model_url      TEXT,                 -- link/path to the valuation spreadsheet, if any
   tags           TEXT NOT NULL DEFAULT '[]',
@@ -157,7 +165,7 @@ CREATE TABLE IF NOT EXISTS interactions (
   id            INTEGER PRIMARY KEY,
   position_id   INTEGER NOT NULL REFERENCES positions(id) ON DELETE CASCADE,
   ts            TEXT NOT NULL DEFAULT (datetime('now')),   -- UTC ISO
-  kind          TEXT NOT NULL CHECK (kind IN ('buy','sell','add','trim','news','earnings','call','thought','review')),
+  kind          TEXT NOT NULL CHECK (kind IN ('buy','sell','add','trim','news','earnings','call','thought','review','alert')),
   content       TEXT NOT NULL,         -- markdown
   price         REAL,
   behavior_tags TEXT NOT NULL DEFAULT '[]',
@@ -193,6 +201,47 @@ CREATE TABLE IF NOT EXISTS proposals (
   applied_ref TEXT
 );
 
+-- Raw year-to-date figures from the quarterly income statement (TWSE/TPEx open data publish YTD).
+-- Single-quarter metrics are derived by differencing consecutive quarters. Thousands of TWD.
+CREATE TABLE IF NOT EXISTS financials_ytd (
+  id           INTEGER PRIMARY KEY,
+  company_id   TEXT NOT NULL REFERENCES companies(id),
+  year         INTEGER NOT NULL,
+  quarter      INTEGER NOT NULL CHECK (quarter BETWEEN 1 AND 4),
+  revenue      REAL,
+  gross_profit REAL,
+  opex         REAL,
+  net_income   REAL,
+  eps          REAL,
+  source       TEXT,
+  fetched_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (company_id, year, quarter)
+);
+
+-- AI- or human-written prose about a company. Append-only: every update is a new row, latest wins.
+-- profile = what the company does (stable); highlights = recent developments (dated).
+CREATE TABLE IF NOT EXISTS company_briefs (
+  id         INTEGER PRIMARY KEY,
+  company_id TEXT NOT NULL REFERENCES companies(id),
+  date       TEXT NOT NULL,                -- YYYY-MM-DD the brief is about / was written
+  kind       TEXT NOT NULL CHECK (kind IN ('profile','highlights')),
+  content    TEXT NOT NULL,                -- markdown
+  sources    TEXT NOT NULL DEFAULT '[]',   -- JSON [{title, url, date}]
+  created_by TEXT NOT NULL DEFAULT 'user',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_briefs_company ON company_briefs(company_id, kind, date);
+
+-- Every automated job writes one row here, so "who touched the data and when" is always answerable.
+CREATE TABLE IF NOT EXISTS maintenance_log (
+  id      INTEGER PRIMARY KEY,
+  ts      TEXT NOT NULL DEFAULT (datetime('now')),
+  job     TEXT NOT NULL,                -- backup | fetch_monthly | fetch_quarterly | fetch_shares | quality | morning
+  status  TEXT NOT NULL CHECK (status IN ('ok','error','skipped')),
+  summary TEXT NOT NULL,
+  details TEXT                          -- JSON
+);
+
 CREATE TABLE IF NOT EXISTS tier_rules (
   tier     TEXT PRIMARY KEY CHECK (tier IN ('core','satellite','watch','blacklist')),
   max_pct  REAL NOT NULL,
@@ -217,6 +266,8 @@ _MIGRATIONS = [
     ("edges", "relation", "TEXT NOT NULL DEFAULT 'customer'"),
     ("positions", "target_basis", "TEXT"),
     ("positions", "model_url", "TEXT"),
+    ("positions", "shares", "INTEGER"),
+    ("positions", "avg_cost", "REAL"),
     ("interactions", "driver_id", "INTEGER REFERENCES drivers(id) ON DELETE SET NULL"),
     ("interactions", "checkpoint_id", "INTEGER REFERENCES checkpoints(id) ON DELETE SET NULL"),
     ("interactions", "effect", "TEXT"),
@@ -228,6 +279,49 @@ def _migrate(conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+    # edges.relation CHECK predates 'holding'; rebuild the table when the old constraint is present.
+    sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='edges'").fetchone()
+    if sql and "relation IN ('customer','partner'))" in sql[0]:
+        conn.executescript("""
+            ALTER TABLE edges RENAME TO edges_old;
+            CREATE TABLE edges (
+              id INTEGER PRIMARY KEY, customer_id TEXT NOT NULL REFERENCES companies(id),
+              supplier_id TEXT NOT NULL REFERENCES companies(id), revenue_share REAL, lag_days INTEGER,
+              confidence TEXT NOT NULL DEFAULT 'medium' CHECK (confidence IN ('high','medium','low')),
+              relation TEXT NOT NULL DEFAULT 'customer' CHECK (relation IN ('customer','partner','holding')),
+              source TEXT, notes TEXT, created_by TEXT NOT NULL DEFAULT 'user',
+              created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (customer_id, supplier_id));
+            INSERT INTO edges (id, customer_id, supplier_id, revenue_share, lag_days, confidence, relation, source, notes,
+                               created_by, created_at)
+              SELECT id, customer_id, supplier_id, revenue_share, lag_days, confidence, relation, source, notes,
+                     created_by, created_at FROM edges_old;
+            DROP TABLE edges_old;
+            CREATE INDEX IF NOT EXISTS idx_edges_customer ON edges(customer_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_supplier ON edges(supplier_id);
+        """)
+    # interactions.kind CHECK predates 'alert'. checkpoints.interaction_id references this table, so build the
+    # replacement under a temporary name, drop the old one, then rename (renaming the old table first would
+    # drag the foreign key along with it).
+    sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='interactions'").fetchone()
+    if sql and "'review'))" in sql[0] and "'alert'" not in sql[0]:
+        conn.executescript("""
+            CREATE TABLE interactions_new (
+              id INTEGER PRIMARY KEY, position_id INTEGER NOT NULL REFERENCES positions(id) ON DELETE CASCADE,
+              ts TEXT NOT NULL DEFAULT (datetime('now')),
+              kind TEXT NOT NULL CHECK (kind IN ('buy','sell','add','trim','news','earnings','call','thought','review','alert')),
+              content TEXT NOT NULL, price REAL, behavior_tags TEXT NOT NULL DEFAULT '[]', source_url TEXT,
+              driver_id INTEGER REFERENCES drivers(id) ON DELETE SET NULL,
+              checkpoint_id INTEGER REFERENCES checkpoints(id) ON DELETE SET NULL,
+              effect TEXT CHECK (effect IN ('supports','weakens','confirms')),
+              created_by TEXT NOT NULL DEFAULT 'user', created_at TEXT NOT NULL DEFAULT (datetime('now')));
+            INSERT INTO interactions_new (id, position_id, ts, kind, content, price, behavior_tags, source_url, driver_id,
+                                          checkpoint_id, effect, created_by, created_at)
+              SELECT id, position_id, ts, kind, content, price, behavior_tags, source_url, driver_id, checkpoint_id, effect,
+                     created_by, created_at FROM interactions;
+            DROP TABLE interactions;
+            ALTER TABLE interactions_new RENAME TO interactions;
+            CREATE INDEX IF NOT EXISTS idx_interactions_pos ON interactions(position_id, ts);
+        """)
     # proposals.kind used to carry a CHECK constraint listing the first four kinds; rebuild if so.
     sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='proposals'").fetchone()
     if sql and "CHECK (kind IN" in sql[0]:

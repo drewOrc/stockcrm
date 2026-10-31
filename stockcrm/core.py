@@ -201,6 +201,7 @@ def list_positions(conn, stage: str | None = None, tier: str | None = None) -> l
     for r in rows:
         r["days_since_update"] = _days_since(r["last_interaction"] or r["updated_at"])
         r["health_issues"] = len(thesis_health(conn, r["id"])["issues"]) if r["stage"] != "exited" else 0
+        r.update(brief_summary(conn, r["company_id"]))
     return rows
 
 
@@ -238,12 +239,13 @@ def get_position(conn, ref: str | int) -> dict | None:
     row["checkpoints"] = list_checkpoints(conn, row["id"])
     row["metrics"] = metric_comparison(conn, row["company_id"])
     row["health"] = thesis_health(conn, row["id"], _pos=row)
+    row["briefs"] = briefs_for_card(conn, row["company_id"])
     return row
 
 
 def upsert_position(conn, company_id: str, stage: str, tier: str, thesis=None, invalidation=None,
                     target_price=None, stop_price=None, position_pct=None, idea_source=None, tags=None,
-                    thesis_status=None, target_basis=None, model_url=None) -> dict:
+                    thesis_status=None, target_basis=None, model_url=None, shares=None, avg_cost=None) -> dict:
     _check(stage, db.STAGES, "stage")
     _check(tier, db.TIERS, "tier")
     if thesis_status is not None:
@@ -258,17 +260,18 @@ def upsert_position(conn, company_id: str, stage: str, tier: str, thesis=None, i
                target_price=COALESCE(?,target_price), stop_price=COALESCE(?,stop_price),
                position_pct=COALESCE(?,position_pct), idea_source=COALESCE(?,idea_source),
                tags=COALESCE(?,tags), thesis_status=COALESCE(?,thesis_status),
-               target_basis=COALESCE(?,target_basis), model_url=COALESCE(?,model_url), updated_at=? WHERE id=?""",
+               target_basis=COALESCE(?,target_basis), model_url=COALESCE(?,model_url),
+               shares=COALESCE(?,shares), avg_cost=COALESCE(?,avg_cost), updated_at=? WHERE id=?""",
             (stage, tier, thesis, invalidation, target_price, stop_price, position_pct, idea_source,
              _json_list(tags) if tags is not None else None, thesis_status, target_basis, model_url,
-             _now(), existing["id"]))
+             shares, avg_cost, _now(), existing["id"]))
     else:
         conn.execute(
             """INSERT INTO positions (company_id, stage, tier, thesis, invalidation, target_price, stop_price,
-               position_pct, idea_source, tags, thesis_status, target_basis, model_url)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               position_pct, idea_source, tags, thesis_status, target_basis, model_url, shares, avg_cost)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (company_id, stage, tier, thesis, invalidation, target_price, stop_price, position_pct or 0,
-             idea_source, _json_list(tags), thesis_status or "intact", target_basis, model_url))
+             idea_source, _json_list(tags), thesis_status or "intact", target_basis, model_url, shares, avg_cost))
     conn.commit()
     return get_position(conn, company_id)
 
@@ -556,6 +559,13 @@ def _validate_payload(conn, kind, p: dict):
             raise ValueError("payload.status must be confirmed or missed")
         if not _row(conn.execute("SELECT id FROM checkpoints WHERE id=?", (p["checkpoint_id"],))):
             raise ValueError("payload.checkpoint_id unknown")
+    elif kind == "brief":
+        _need(p, "company_id", "kind", "content")
+        _check(p["kind"], db.BRIEF_KINDS, "payload.kind")
+        if not get_company(conn, p["company_id"]):
+            raise ValueError("payload.company_id unknown")
+        if p.get("date"):
+            datetime.strptime(p["date"], "%Y-%m-%d")
     elif kind == "metric":
         _need(p, "company_id", "metric", "period", "kind", "value")
         _check(p["metric"], db.METRICS, "payload.metric")
@@ -626,6 +636,10 @@ def _proposal_summary(conn, pr: dict) -> str:
     if pr["kind"] == "metric":
         kind = "實際" if p["kind"] == "actual" else "模型"
         return f"{db.METRIC_LABELS[p['metric']]} {p['period']} {kind} = {p['value']}（{p['company_id']}）"
+    if pr["kind"] == "brief":
+        c = get_company(conn, p["company_id"])
+        label = "公司簡介" if p["kind"] == "profile" else "近期重點"
+        return f"{label}：{c['name'] if c else p['company_id']}：{_first_sentence(p['content'], 60)}"
     return pr["kind"]
 
 
@@ -675,6 +689,9 @@ def apply_proposal(conn, pr: dict) -> str:
     if pr["kind"] == "metric":
         r = set_metric(conn, p["company_id"], p["metric"], p["period"], p["kind"], p["value"], p.get("source"), created_by=by)
         return f"metric:{r['id']}"
+    if pr["kind"] == "brief":
+        r = add_brief(conn, p["company_id"], p["kind"], p["content"], p.get("sources"), p.get("date"), created_by=by)
+        return f"brief:{r['id']}"
     if pr["kind"] == "thesis_status":
         set_thesis_status(conn, p["position_id"], p["status"])
         if p.get("note"):
@@ -1090,3 +1107,308 @@ def apply_template(conn, position_id: int, key: str, created_by="user") -> dict:
         made["checkpoints"].append(add_checkpoint(conn, position_id, c["title"], due, c.get("evidence_needed"),
                                                   created_by=created_by)["id"])
     return made
+
+
+# ================================================================ maintenance
+# Automated upkeep: backups, official-fact ingestion helpers, data-quality report, job log.
+# Policy: scripts write official facts directly (created_by 'system:*'); anything needing judgment
+# still goes through proposals; thesis/positions stay the user's.
+
+def tw_companies(conn) -> list[dict]:
+    """TW companies worth fetching: every TW company that has a card or sits on an edge.
+    ETFs (sector 'ETF') are skipped: no revenue, no income statement."""
+    return _rows(conn.execute(
+        """SELECT DISTINCT c.id, c.ticker, c.name FROM companies c
+           LEFT JOIN positions p ON p.company_id=c.id
+           LEFT JOIN edges e ON e.customer_id=c.id OR e.supplier_id=c.id
+           WHERE c.market='TW' AND IFNULL(c.sector,'')<>'ETF' AND (p.id IS NOT NULL OR e.id IS NOT NULL)
+           ORDER BY c.ticker"""))
+
+
+def log_maintenance(conn, job: str, status: str, summary: str, details=None) -> dict:
+    if status not in ("ok", "error", "skipped"):
+        raise ValueError("status must be ok, error or skipped")
+    payload = json.dumps(details, ensure_ascii=False, default=str) if details is not None else None
+    cur = conn.execute("INSERT INTO maintenance_log (job, status, summary, details) VALUES (?,?,?,?)",
+                       (job, status, summary, payload))
+    conn.commit()
+    return _row(conn.execute("SELECT * FROM maintenance_log WHERE id=?", (cur.lastrowid,)))
+
+
+def list_maintenance(conn, limit: int = 30) -> list[dict]:
+    rows = _rows(conn.execute("SELECT * FROM maintenance_log ORDER BY ts DESC, id DESC LIMIT ?", (limit,)))
+    for r in rows:
+        if r["details"]:
+            try:
+                r["details"] = json.loads(r["details"])
+            except json.JSONDecodeError:
+                pass
+    return rows
+
+
+def last_run(conn, job: str) -> dict | None:
+    return _row(conn.execute("SELECT * FROM maintenance_log WHERE job=? ORDER BY ts DESC, id DESC LIMIT 1", (job,)))
+
+
+def backup_db(conn, keep_days: int = 30, backup_dir=None) -> dict:
+    """Consistent online copy of the database via the SQLite backup API; prunes copies older than keep_days."""
+    import sqlite3 as _sq
+    from pathlib import Path
+    src_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    bdir = Path(backup_dir) if backup_dir else src_path.parent / "backups"
+    bdir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    dest = bdir / f"{src_path.stem}-{stamp}.db"
+    with _sq.connect(dest) as out:
+        conn.backup(out)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=keep_days)
+    pruned = []
+    for f in bdir.glob(f"{src_path.stem}-*.db"):
+        try:
+            when = datetime.strptime(f.stem.split("-", 1)[1], "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if when < cutoff:
+            f.unlink()
+            pruned.append(f.name)
+    return {"path": str(dest), "bytes": dest.stat().st_size, "pruned": pruned,
+            "kept": len(list(bdir.glob(f"{src_path.stem}-*.db")))}
+
+
+def upsert_financials_ytd(conn, company_id, year, quarter, revenue, gross_profit, opex, net_income, eps, source=None):
+    conn.execute(
+        """INSERT INTO financials_ytd (company_id, year, quarter, revenue, gross_profit, opex, net_income, eps,
+                                       source, fetched_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(company_id, year, quarter) DO UPDATE SET revenue=excluded.revenue, gross_profit=excluded.gross_profit,
+             opex=excluded.opex, net_income=excluded.net_income, eps=excluded.eps, source=excluded.source,
+             fetched_at=excluded.fetched_at""",
+        (company_id, int(year), int(quarter), revenue, gross_profit, opex, net_income, eps, source, _now()))
+    conn.commit()
+
+
+def derive_quarterly_metrics(conn, company_id, year, quarter, created_by="system:mops") -> dict:
+    """Turn YTD figures into single-quarter metrics: Q1 as is; Qn = YTD(Qn) - YTD(Qn-1) when stored."""
+    cur = _row(conn.execute("SELECT * FROM financials_ytd WHERE company_id=? AND year=? AND quarter=?",
+                            (company_id, year, quarter)))
+    if not cur:
+        return {"written": [], "reason": "no ytd row"}
+    if quarter == 1:
+        prev = {"revenue": 0, "gross_profit": 0, "opex": 0, "net_income": 0, "eps": 0}
+    else:
+        prev = _row(conn.execute("SELECT * FROM financials_ytd WHERE company_id=? AND year=? AND quarter=?",
+                                 (company_id, year, quarter - 1)))
+        if not prev:
+            return {"written": [], "reason": f"need YTD for Q{quarter - 1} {year} to difference; stored YTD only"}
+    period = f"{year}Q{quarter}"
+    written = []
+
+    def diff(k):
+        if cur[k] is None or prev[k] is None:
+            return None
+        return cur[k] - prev[k]
+
+    rev, gp, opex, eps = diff("revenue"), diff("gross_profit"), diff("opex"), diff("eps")
+    if rev:
+        set_metric(conn, company_id, "revenue_q", period, "actual", rev, cur["source"], created_by)
+        written.append("revenue_q")
+        if gp is not None:
+            set_metric(conn, company_id, "gross_margin", period, "actual", round(gp / rev, 4), cur["source"], created_by)
+            written.append("gross_margin")
+    if opex is not None:
+        set_metric(conn, company_id, "opex", period, "actual", opex, cur["source"], created_by)
+        written.append("opex")
+    if eps is not None:
+        set_metric(conn, company_id, "eps", period, "actual", round(eps, 2), cur["source"], created_by)
+        written.append("eps")
+    return {"written": written, "period": period}
+
+
+def data_quality_report(conn, stale_days: int = 30, proposal_days: int = 14) -> dict:
+    """What a maintainer should fix or chase. Each list holds small dicts; counts are summed in `total`."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=proposal_days)).strftime("%Y-%m-%d %H:%M:%S")
+    rep = {
+        "edges_without_source": _rows(conn.execute(
+            "SELECT id, customer_id, supplier_id, revenue_share FROM edges WHERE source IS NULL OR source=''")),
+        "critical_drivers_without_model": _rows(conn.execute(
+            """SELECT d.id, d.name, c.name AS company FROM drivers d JOIN positions p ON p.id=d.position_id
+               JOIN companies c ON c.id=p.company_id
+               WHERE d.critical=1 AND NOT EXISTS (SELECT 1 FROM driver_values v WHERE v.driver_id=d.id AND v.kind='model')""")),
+        "holdings_without_invalidation": _rows(conn.execute(
+            """SELECT p.id, c.name FROM positions p JOIN companies c ON c.id=p.company_id
+               WHERE p.stage='hold' AND (p.invalidation IS NULL OR p.invalidation='')""")),
+        "holdings_without_drivers": _rows(conn.execute(
+            """SELECT p.id, c.name FROM positions p JOIN companies c ON c.id=p.company_id
+               WHERE p.stage='hold' AND NOT EXISTS (SELECT 1 FROM drivers d WHERE d.position_id=p.id)""")),
+        "proposals_pending_too_long": _rows(conn.execute(
+            "SELECT id, kind, created_by, created_at FROM proposals WHERE status='pending' AND created_at<?", (cutoff,))),
+        "stale_holdings": [{"company_id": p["company_id"], "name": p["name"], "days": p["days_since_update"]}
+                           for p in stale_positions(conn, stale_days)],
+        "overdue_checkpoints": [{"id": c["id"], "company": c["company_name"], "title": c["title"],
+                                 "expected_by": c["expected_by"]} for c in overdue_checkpoints(conn)],
+    }
+    # TW companies whose latest monthly revenue is older than ~45 days (should have a newer release by now)
+    stale_rev = []
+    for c in tw_companies(conn):
+        last = _row(conn.execute(
+            "SELECT MAX(period) AS p FROM metrics WHERE company_id=? AND metric='revenue_m' AND kind='actual'", (c["id"],)))
+        p = last["p"] if last else None
+        if p:
+            y, m = int(p[:4]), int(p[5:])
+            age = (datetime.now(timezone.utc).year - y) * 12 + datetime.now(timezone.utc).month - m
+            if age > 2:
+                stale_rev.append({"company_id": c["id"], "name": c["name"], "latest": p, "months_behind": age})
+        else:
+            stale_rev.append({"company_id": c["id"], "name": c["name"], "latest": None, "months_behind": None})
+    rep["tw_companies_missing_recent_revenue"] = stale_rev
+    rep["total"] = sum(len(v) for v in rep.values() if isinstance(v, list))
+    rep["generated_at"] = _now()
+    return rep
+
+
+def quality_markdown(rep: dict) -> str:
+    labels = {
+        "edges_without_source": "沒有來源的供應鏈關係",
+        "critical_drivers_without_model": "沒有模型值的關鍵驅動因子",
+        "holdings_without_invalidation": "沒有失效條件的持股",
+        "holdings_without_drivers": "沒有驅動因子的持股",
+        "proposals_pending_too_long": "放超過兩週沒批的提案",
+        "stale_holdings": "超過 30 天沒更新的持股",
+        "overdue_checkpoints": "逾期檢查點",
+        "tw_companies_missing_recent_revenue": "月營收不是最新的台股公司",
+    }
+    lines = [f"# 資料品質報告（{rep['generated_at']} UTC）", "", f"共 {rep['total']} 項。", ""]
+    for key, label in labels.items():
+        items = rep.get(key) or []
+        lines.append(f"## {label}（{len(items)}）")
+        for it in items:
+            lines.append("- " + "，".join(f"{k}={v}" for k, v in it.items() if v is not None))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def rename_company(conn, old_id: str, market: str, ticker: str, name: str | None = None) -> dict:
+    """Change a company's id (e.g. a placeholder ticker to the real one) across every table that
+    references it. Positions, edges, metrics and YTD financials follow; the old id disappears."""
+    _check(market, db.MARKETS, "market")
+    old = get_company(conn, old_id)
+    if not old:
+        raise ValueError(f"unknown company {old_id}")
+    new_id = company_id(market, ticker)
+    if new_id != old_id and get_company(conn, new_id):
+        raise ValueError(f"{new_id} already exists; merge by hand")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN")
+        conn.execute("UPDATE companies SET id=?, market=?, ticker=?, name=COALESCE(?, name) WHERE id=?",
+                     (new_id, market.upper(), ticker.upper(), name, old_id))
+        for table, col in (("positions", "company_id"), ("edges", "customer_id"), ("edges", "supplier_id"),
+                           ("metrics", "company_id"), ("financials_ytd", "company_id"),
+                           ("company_briefs", "company_id")):
+            conn.execute(f"UPDATE {table} SET {col}=? WHERE {col}=?", (new_id, old_id))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    return get_company(conn, new_id)
+
+
+DATA_TABLES = ("proposals", "reminders", "interactions", "checkpoints", "driver_values", "drivers",
+               "metrics", "financials_ytd", "company_briefs", "positions", "edges", "companies")
+
+
+def reset_data(conn, keep_log: bool = True) -> dict:
+    """Delete every user/agent data row. Keeps the schema, tier_rules and (by default) maintenance_log.
+    Callers must back up first; this is irreversible."""
+    counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in DATA_TABLES}
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN")
+        for t in DATA_TABLES:
+            conn.execute(f"DELETE FROM {t}")
+        if not keep_log:
+            conn.execute("DELETE FROM maintenance_log")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("VACUUM")
+    log_maintenance(conn, "reset", "ok", "資料已清空：" + "，".join(f"{t} {n}" for t, n in counts.items() if n), counts)
+    return counts
+
+
+# ================================================================ company briefs
+# Prose about a company: profile (what it does) and highlights (recent developments).
+# Numbers and news feeds live in the engine; the written summary lives here. Append-only.
+
+def add_brief(conn, company_id: str, kind: str, content: str, sources=None, date: str | None = None,
+              created_by: str = "user") -> dict:
+    _check(kind, db.BRIEF_KINDS, "kind")
+    if not get_company(conn, company_id):
+        raise ValueError(f"unknown company {company_id}")
+    if not content or not content.strip():
+        raise ValueError("content is empty")
+    date = date or _today()
+    datetime.strptime(date, "%Y-%m-%d")
+    if sources is None:
+        sources = []
+    if isinstance(sources, str):
+        sources = json.loads(sources)
+    if not isinstance(sources, list):
+        raise ValueError("sources must be a list of {title, url, date}")
+    cur = conn.execute(
+        "INSERT INTO company_briefs (company_id, date, kind, content, sources, created_by) VALUES (?,?,?,?,?,?)",
+        (company_id, date, kind, content.strip(), json.dumps(sources, ensure_ascii=False), created_by))
+    conn.commit()
+    return get_brief(conn, cur.lastrowid)
+
+
+def _decode_brief(r: dict) -> dict:
+    try:
+        r["sources"] = json.loads(r["sources"]) if isinstance(r["sources"], str) else r["sources"]
+    except json.JSONDecodeError:
+        r["sources"] = []
+    return r
+
+
+def get_brief(conn, brief_id: int) -> dict | None:
+    r = _row(conn.execute("SELECT * FROM company_briefs WHERE id=?", (brief_id,)))
+    return _decode_brief(r) if r else None
+
+
+def list_briefs(conn, company_id: str, kind: str | None = None, limit: int = 20) -> list[dict]:
+    sql = "SELECT * FROM company_briefs WHERE company_id=?"
+    args: list = [company_id]
+    if kind:
+        _check(kind, db.BRIEF_KINDS, "kind")
+        sql += " AND kind=?"
+        args.append(kind)
+    sql += " ORDER BY date DESC, id DESC LIMIT ?"
+    args.append(limit)
+    return [_decode_brief(r) for r in _rows(conn.execute(sql, args))]
+
+
+def _first_sentence(text: str, limit: int = 80) -> str:
+    t = text.strip().lstrip("-*# ").replace("\n", " ")
+    for sep in ("。", ". ", "！", "？", "；"):
+        if sep in t:
+            t = t.split(sep)[0] + (sep.strip() if sep != ". " else ".")
+            break
+    return t[:limit] + ("…" if len(t) > limit else "")
+
+
+def brief_summary(conn, company_id: str) -> dict:
+    """What a card header needs: latest highlight's first sentence + date, and whether a profile exists."""
+    h = list_briefs(conn, company_id, "highlights", 1)
+    p = list_briefs(conn, company_id, "profile", 1)
+    return {"latest_brief": {"date": h[0]["date"], "text": _first_sentence(h[0]["content"])} if h else None,
+            "has_profile": bool(p)}
+
+
+def briefs_for_card(conn, company_id: str) -> dict:
+    p = list_briefs(conn, company_id, "profile", 1)
+    return {"profile": p[0] if p else None, "highlights": list_briefs(conn, company_id, "highlights", 5)}

@@ -125,6 +125,7 @@ label > input, label > select, label > textarea { margin-top: 3px; }
 .timeline li.buy::before, .timeline li.add::before { background: var(--ok); }
 .timeline li.sell::before, .timeline li.trim::before { background: var(--bad); }
 .timeline li.news::before, .timeline li.earnings::before, .timeline li.call::before { background: var(--accent); }
+.timeline li.alert::before { background: var(--warn); }
 .timeline .when { font-size: 12px; color: var(--muted); }
 .timeline .kind { font-weight: 600; margin-right: 6px; }
 .timeline .by { font-size: 11px; color: var(--muted); margin-left: 6px; }
@@ -164,3 +165,8 @@ ul.issues li.high { color: var(--bad); } ul.issues li.medium { color: var(--warn
 .att { padding: 8px 0; border-bottom: 1px dashed var(--line); }
 .att a, .panel a[data-open] { color: var(--accent); cursor: pointer; text-decoration: none; }
 .graph .edge.partner { stroke: var(--warn); stroke-opacity: .7; }
+.graph .edge.holding { stroke: var(--ok); stroke-opacity: .6; }
+.card .brief-line { font-size: 12px; color: var(--text); opacity: .85; margin: 4px 0 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brief { padding: 6px 0; border-bottom: 1px dashed var(--line); font-size: 13px; }
+.brief:last-child { border-bottom: 0; }
+.brief a { color: var(--accent); }
