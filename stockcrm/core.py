@@ -1098,12 +1098,14 @@ def apply_template(conn, position_id: int, key: str, created_by="user") -> dict:
 # still goes through proposals; thesis/positions stay the user's.
 
 def tw_companies(conn) -> list[dict]:
-    """TW companies worth fetching: every TW company that has a card or sits on an edge."""
+    """TW companies worth fetching: every TW company that has a card or sits on an edge.
+    ETFs (sector 'ETF') are skipped: no revenue, no income statement."""
     return _rows(conn.execute(
         """SELECT DISTINCT c.id, c.ticker, c.name FROM companies c
            LEFT JOIN positions p ON p.company_id=c.id
            LEFT JOIN edges e ON e.customer_id=c.id OR e.supplier_id=c.id
-           WHERE c.market='TW' AND (p.id IS NOT NULL OR e.id IS NOT NULL) ORDER BY c.ticker"""))
+           WHERE c.market='TW' AND IFNULL(c.sector,'')<>'ETF' AND (p.id IS NOT NULL OR e.id IS NOT NULL)
+           ORDER BY c.ticker"""))
 
 
 def log_maintenance(conn, job: str, status: str, summary: str, details=None) -> dict:

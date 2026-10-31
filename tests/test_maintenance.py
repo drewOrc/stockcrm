@@ -55,7 +55,9 @@ def test_apply_monthly_writes_three_months_for_tracked_only(conn):
     assert core.list_metrics(conn, "TW:2330", "revenue_m")[0]["created_by"] == "system:mops"
 
 
-def test_tw_companies_includes_cards_and_edge_members(conn):
+def test_tw_companies_includes_cards_and_edge_members_but_not_etfs(conn):
+    core.upsert_company(conn, "TW", "00981A", "主動統一台股增長", sector="ETF")
+    core.upsert_position(conn, "TW:00981A", "hold", "core", position_pct=50)
     assert [c["ticker"] for c in core.tw_companies(conn)] == ["2330", "2382"]
 
 
