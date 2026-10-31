@@ -365,7 +365,8 @@ def test_alert_kind_migration_keeps_checkpoint_reference(tmp_path):
       INSERT INTO companies (id, market, ticker, name) VALUES ('TW:2330','TW','2330','台積電');
       INSERT INTO positions (company_id, stage, tier) VALUES ('TW:2330','hold','core');
       INSERT INTO interactions (position_id, kind, content) VALUES (1, 'buy', 'x');
-      INSERT INTO checkpoints (position_id, title, expected_by, status, interaction_id) VALUES (1, 'k', '2026-01-01', 'confirmed', 1);
+      INSERT INTO checkpoints (position_id, title, expected_by, status, interaction_id)
+        VALUES (1, 'k', '2026-01-01', 'confirmed', 1);
     """)
     s.commit()
     s.close()
