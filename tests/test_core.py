@@ -292,3 +292,40 @@ def test_etf_holding_exposure(conn):
     nv = core.indirect_exposure(conn, "US:NVDA")
     etf = [e for e in nv["exposures"] if e["company_id"] == "TW:00981A"][0]
     assert etf["exposure_pct"] == pytest.approx(1.18, abs=0.01)
+
+
+def test_briefs_profile_highlights_and_summary(conn):
+    assert core.brief_summary(conn, "TW:2330") == {"latest_brief": None, "has_profile": False}
+    core.add_brief(conn, "TW:2330", "profile", "全球最大晶圓代工。先進製程壟斷。",
+                   [{"title": "年報", "url": "https://x", "date": "2026-03-31"}])
+    core.add_brief(conn, "TW:2330", "highlights", "- Q3 毛利率 57%，上修全年。\n- CoWoS 擴產。", date="2026-10-16")
+    core.add_brief(conn, "TW:2330", "highlights", "- 10 月營收創高。", date="2026-11-10")
+    s = core.brief_summary(conn, "TW:2330")
+    assert s["has_profile"] is True and s["latest_brief"]["date"] == "2026-11-10"
+    assert s["latest_brief"]["text"] == "10 月營收創高。"
+    card = core.briefs_for_card(conn, "TW:2330")
+    assert card["profile"]["sources"][0]["title"] == "年報"
+    assert [h["date"] for h in card["highlights"]] == ["2026-11-10", "2026-10-16"]
+    assert core.list_positions(conn)[0]["latest_brief"]["text"] == "10 月營收創高。"
+    with pytest.raises(ValueError):
+        core.add_brief(conn, "TW:2330", "rumor", "x")
+    with pytest.raises(ValueError):
+        core.add_brief(conn, "TW:2330", "profile", "   ")
+
+
+def test_brief_proposal_applies(conn):
+    payload = {"company_id": "TW:2382", "kind": "highlights", "content": "- 終止收購廠房。",
+               "sources": [{"title": "鉅亨", "url": "https://u", "date": "2026-10-30"}]}
+    pr = core.create_proposal(conn, "brief", payload, "近況", "agent:t")
+    assert core.list_proposals(conn)[0]["summary"].startswith("近期重點：廣達")
+    done = core.decide_proposal(conn, pr["id"], True)
+    assert done["applied_ref"].startswith("brief:")
+    assert core.list_briefs(conn, "TW:2382")[0]["created_by"] == "agent:t"
+
+
+def test_reset_and_rename_cover_briefs(conn):
+    core.add_brief(conn, "TW:2382", "profile", "伺服器 ODM。")
+    core.rename_company(conn, "TW:2382", "TW", "9999")
+    assert core.list_briefs(conn, "TW:9999")[0]["content"] == "伺服器 ODM。"
+    core.reset_data(conn)
+    assert conn.execute("SELECT COUNT(*) FROM company_briefs").fetchone()[0] == 0

@@ -250,6 +250,21 @@ async def upsert_company(req: Request):
                      b.get("sector"), b.get("notes"))
 
 
+@app.get("/api/companies/{cid}/briefs")
+def briefs(cid: str, kind: str | None = None, limit: int = 20):
+    with conn() as c:
+        return guard(core.list_briefs, c, cid, kind, limit)
+
+
+@app.post("/api/companies/{cid}/briefs")
+async def add_brief(cid: str, req: Request):
+    """Direct write, mainly for profile text. Agents propose highlights via proposals (kind=brief)."""
+    b = await body(req)
+    with conn() as c:
+        return guard(core.add_brief, c, cid, b.get("kind", "profile"), b.get("content", ""), b.get("sources"),
+                     b.get("date"), str(b.get("created_by") or "user"))
+
+
 @app.get("/api/graph")
 def graph():
     with conn() as c:

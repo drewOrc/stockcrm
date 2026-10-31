@@ -201,6 +201,7 @@ def list_positions(conn, stage: str | None = None, tier: str | None = None) -> l
     for r in rows:
         r["days_since_update"] = _days_since(r["last_interaction"] or r["updated_at"])
         r["health_issues"] = len(thesis_health(conn, r["id"])["issues"]) if r["stage"] != "exited" else 0
+        r.update(brief_summary(conn, r["company_id"]))
     return rows
 
 
@@ -238,6 +239,7 @@ def get_position(conn, ref: str | int) -> dict | None:
     row["checkpoints"] = list_checkpoints(conn, row["id"])
     row["metrics"] = metric_comparison(conn, row["company_id"])
     row["health"] = thesis_health(conn, row["id"], _pos=row)
+    row["briefs"] = briefs_for_card(conn, row["company_id"])
     return row
 
 
@@ -556,6 +558,13 @@ def _validate_payload(conn, kind, p: dict):
             raise ValueError("payload.status must be confirmed or missed")
         if not _row(conn.execute("SELECT id FROM checkpoints WHERE id=?", (p["checkpoint_id"],))):
             raise ValueError("payload.checkpoint_id unknown")
+    elif kind == "brief":
+        _need(p, "company_id", "kind", "content")
+        _check(p["kind"], db.BRIEF_KINDS, "payload.kind")
+        if not get_company(conn, p["company_id"]):
+            raise ValueError("payload.company_id unknown")
+        if p.get("date"):
+            datetime.strptime(p["date"], "%Y-%m-%d")
     elif kind == "metric":
         _need(p, "company_id", "metric", "period", "kind", "value")
         _check(p["metric"], db.METRICS, "payload.metric")
@@ -626,6 +635,10 @@ def _proposal_summary(conn, pr: dict) -> str:
     if pr["kind"] == "metric":
         kind = "實際" if p["kind"] == "actual" else "模型"
         return f"{db.METRIC_LABELS[p['metric']]} {p['period']} {kind} = {p['value']}（{p['company_id']}）"
+    if pr["kind"] == "brief":
+        c = get_company(conn, p["company_id"])
+        label = "公司簡介" if p["kind"] == "profile" else "近期重點"
+        return f"{label}：{c['name'] if c else p['company_id']}：{_first_sentence(p['content'], 60)}"
     return pr["kind"]
 
 
@@ -675,6 +688,9 @@ def apply_proposal(conn, pr: dict) -> str:
     if pr["kind"] == "metric":
         r = set_metric(conn, p["company_id"], p["metric"], p["period"], p["kind"], p["value"], p.get("source"), created_by=by)
         return f"metric:{r['id']}"
+    if pr["kind"] == "brief":
+        r = add_brief(conn, p["company_id"], p["kind"], p["content"], p.get("sources"), p.get("date"), created_by=by)
+        return f"brief:{r['id']}"
     if pr["kind"] == "thesis_status":
         set_thesis_status(conn, p["position_id"], p["status"])
         if p.get("note"):
@@ -1286,7 +1302,8 @@ def rename_company(conn, old_id: str, market: str, ticker: str, name: str | None
         conn.execute("UPDATE companies SET id=?, market=?, ticker=?, name=COALESCE(?, name) WHERE id=?",
                      (new_id, market.upper(), ticker.upper(), name, old_id))
         for table, col in (("positions", "company_id"), ("edges", "customer_id"), ("edges", "supplier_id"),
-                           ("metrics", "company_id"), ("financials_ytd", "company_id")):
+                           ("metrics", "company_id"), ("financials_ytd", "company_id"),
+                           ("company_briefs", "company_id")):
             conn.execute(f"UPDATE {table} SET {col}=? WHERE {col}=?", (new_id, old_id))
         conn.execute("COMMIT")
     except Exception:
@@ -1298,7 +1315,7 @@ def rename_company(conn, old_id: str, market: str, ticker: str, name: str | None
 
 
 DATA_TABLES = ("proposals", "reminders", "interactions", "checkpoints", "driver_values", "drivers",
-               "metrics", "financials_ytd", "positions", "edges", "companies")
+               "metrics", "financials_ytd", "company_briefs", "positions", "edges", "companies")
 
 
 def reset_data(conn, keep_log: bool = True) -> dict:
@@ -1321,3 +1338,76 @@ def reset_data(conn, keep_log: bool = True) -> dict:
     conn.execute("VACUUM")
     log_maintenance(conn, "reset", "ok", "資料已清空：" + "，".join(f"{t} {n}" for t, n in counts.items() if n), counts)
     return counts
+
+
+# ================================================================ company briefs
+# Prose about a company: profile (what it does) and highlights (recent developments).
+# Numbers and news feeds live in the engine; the written summary lives here. Append-only.
+
+def add_brief(conn, company_id: str, kind: str, content: str, sources=None, date: str | None = None,
+              created_by: str = "user") -> dict:
+    _check(kind, db.BRIEF_KINDS, "kind")
+    if not get_company(conn, company_id):
+        raise ValueError(f"unknown company {company_id}")
+    if not content or not content.strip():
+        raise ValueError("content is empty")
+    date = date or _today()
+    datetime.strptime(date, "%Y-%m-%d")
+    if sources is None:
+        sources = []
+    if isinstance(sources, str):
+        sources = json.loads(sources)
+    if not isinstance(sources, list):
+        raise ValueError("sources must be a list of {title, url, date}")
+    cur = conn.execute(
+        "INSERT INTO company_briefs (company_id, date, kind, content, sources, created_by) VALUES (?,?,?,?,?,?)",
+        (company_id, date, kind, content.strip(), json.dumps(sources, ensure_ascii=False), created_by))
+    conn.commit()
+    return get_brief(conn, cur.lastrowid)
+
+
+def _decode_brief(r: dict) -> dict:
+    try:
+        r["sources"] = json.loads(r["sources"]) if isinstance(r["sources"], str) else r["sources"]
+    except json.JSONDecodeError:
+        r["sources"] = []
+    return r
+
+
+def get_brief(conn, brief_id: int) -> dict | None:
+    r = _row(conn.execute("SELECT * FROM company_briefs WHERE id=?", (brief_id,)))
+    return _decode_brief(r) if r else None
+
+
+def list_briefs(conn, company_id: str, kind: str | None = None, limit: int = 20) -> list[dict]:
+    sql = "SELECT * FROM company_briefs WHERE company_id=?"
+    args: list = [company_id]
+    if kind:
+        _check(kind, db.BRIEF_KINDS, "kind")
+        sql += " AND kind=?"
+        args.append(kind)
+    sql += " ORDER BY date DESC, id DESC LIMIT ?"
+    args.append(limit)
+    return [_decode_brief(r) for r in _rows(conn.execute(sql, args))]
+
+
+def _first_sentence(text: str, limit: int = 80) -> str:
+    t = text.strip().lstrip("-*# ").replace("\n", " ")
+    for sep in ("。", ". ", "！", "？", "；"):
+        if sep in t:
+            t = t.split(sep)[0] + (sep.strip() if sep != ". " else ".")
+            break
+    return t[:limit] + ("…" if len(t) > limit else "")
+
+
+def brief_summary(conn, company_id: str) -> dict:
+    """What a card header needs: latest highlight's first sentence + date, and whether a profile exists."""
+    h = list_briefs(conn, company_id, "highlights", 1)
+    p = list_briefs(conn, company_id, "profile", 1)
+    return {"latest_brief": {"date": h[0]["date"], "text": _first_sentence(h[0]["content"])} if h else None,
+            "has_profile": bool(p)}
+
+
+def briefs_for_card(conn, company_id: str) -> dict:
+    p = list_briefs(conn, company_id, "profile", 1)
+    return {"profile": p[0] if p else None, "highlights": list_briefs(conn, company_id, "highlights", 5)}

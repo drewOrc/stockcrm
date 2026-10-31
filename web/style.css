@@ -165,3 +165,7 @@ ul.issues li.high { color: var(--bad); } ul.issues li.medium { color: var(--warn
 .att a, .panel a[data-open] { color: var(--accent); cursor: pointer; text-decoration: none; }
 .graph .edge.partner { stroke: var(--warn); stroke-opacity: .7; }
 .graph .edge.holding { stroke: var(--ok); stroke-opacity: .6; }
+.card .brief-line { font-size: 12px; color: var(--text); opacity: .85; margin: 4px 0 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brief { padding: 6px 0; border-bottom: 1px dashed var(--line); font-size: 13px; }
+.brief:last-child { border-bottom: 0; }
+.brief a { color: var(--accent); }

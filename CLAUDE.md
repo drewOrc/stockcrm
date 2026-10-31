@@ -12,6 +12,8 @@
 - **互動紀錄（interactions）** 是 CRM 的聯絡紀錄：buy / sell / add / trim / news / earnings / call / thought / review。
   可以掛到一個驅動因子或檢查點上，並標 `effect`：supports / weakens / confirms。這是證據累積的方式。
 - **提案（proposals）** 是 agent 的寫入通道。使用者在網頁上核准後才會套用。
+- **公司簡介（company_briefs）**：`profile`（公司在做什麼，穩定）與 `highlights`（近期重點，有日期）。
+  數字與新聞來源在引擎（`get_engine_summary`），寫出來的文字在這裡。profile 可直接寫，highlights 走 `propose_brief`。
 
 每張卡片的論點可以用三種通用容器變成「可驗證的」：
 

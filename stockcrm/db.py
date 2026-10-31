@@ -10,7 +10,8 @@ Enumerations (closed lists; agents must not invent new values):
   interaction.effect: supports | weakens | confirms   (how it bears on the linked driver/checkpoint)
   reminder.kind: price | earnings | revenue | review | other
   proposal.kind: interaction | edge | thesis_status | reminder
-                 | driver | driver_value | checkpoint | checkpoint_resolve | metric
+                 | driver | driver_value | checkpoint | checkpoint_resolve | metric | brief
+  brief.kind:    profile (what the company does) | highlights (recent developments)
   proposal.status: pending | approved | rejected
   edge.confidence: high | medium | low
   edge.relation: customer (customer buys from supplier) | partner (capacity/licensing partner)
@@ -38,7 +39,8 @@ INTERACTION_KINDS = ("buy", "sell", "add", "trim", "news", "earnings", "call", "
 EFFECTS = ("supports", "weakens", "confirms")
 REMINDER_KINDS = ("price", "earnings", "revenue", "review", "other")
 PROPOSAL_KINDS = ("interaction", "edge", "thesis_status", "reminder",
-                  "driver", "driver_value", "checkpoint", "checkpoint_resolve", "metric")
+                  "driver", "driver_value", "checkpoint", "checkpoint_resolve", "metric", "brief")
+BRIEF_KINDS = ("profile", "highlights")
 PROPOSAL_STATUSES = ("pending", "approved", "rejected")
 CONFIDENCES = ("high", "medium", "low")
 RELATIONS = ("customer", "partner", "holding")
@@ -212,6 +214,20 @@ CREATE TABLE IF NOT EXISTS financials_ytd (
   fetched_at   TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (company_id, year, quarter)
 );
+
+-- AI- or human-written prose about a company. Append-only: every update is a new row, latest wins.
+-- profile = what the company does (stable); highlights = recent developments (dated).
+CREATE TABLE IF NOT EXISTS company_briefs (
+  id         INTEGER PRIMARY KEY,
+  company_id TEXT NOT NULL REFERENCES companies(id),
+  date       TEXT NOT NULL,                -- YYYY-MM-DD the brief is about / was written
+  kind       TEXT NOT NULL CHECK (kind IN ('profile','highlights')),
+  content    TEXT NOT NULL,                -- markdown
+  sources    TEXT NOT NULL DEFAULT '[]',   -- JSON [{title, url, date}]
+  created_by TEXT NOT NULL DEFAULT 'user',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_briefs_company ON company_briefs(company_id, kind, date);
 
 -- Every automated job writes one row here, so "who touched the data and when" is always answerable.
 CREATE TABLE IF NOT EXISTS maintenance_log (
