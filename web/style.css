@@ -164,3 +164,4 @@ ul.issues li.high { color: var(--bad); } ul.issues li.medium { color: var(--warn
 .att { padding: 8px 0; border-bottom: 1px dashed var(--line); }
 .att a, .panel a[data-open] { color: var(--accent); cursor: pointer; text-decoration: none; }
 .graph .edge.partner { stroke: var(--warn); stroke-opacity: .7; }
+.graph .edge.holding { stroke: var(--ok); stroke-opacity: .6; }

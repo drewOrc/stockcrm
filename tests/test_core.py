@@ -255,3 +255,40 @@ def test_rename_company_moves_references(conn):
     assert core.list_metrics(conn, "TW:4542", "revenue_m")[0]["value"] == 1
     with pytest.raises(ValueError):
         core.rename_company(conn, "TW:4542", "TW", "2330")
+
+
+def test_holding_relation_and_migration_from_partner_only_check(tmp_path):
+    import sqlite3
+    old = tmp_path / "e.db"
+    s = sqlite3.connect(old)
+    s.executescript("""
+      CREATE TABLE companies (id TEXT PRIMARY KEY, market TEXT, ticker TEXT, name TEXT, name_en TEXT, sector TEXT,
+        notes TEXT, created_at TEXT);
+      CREATE TABLE edges (id INTEGER PRIMARY KEY, customer_id TEXT NOT NULL REFERENCES companies(id),
+        supplier_id TEXT NOT NULL REFERENCES companies(id), revenue_share REAL, lag_days INTEGER,
+        confidence TEXT NOT NULL DEFAULT 'medium' CHECK (confidence IN ('high','medium','low')),
+        relation TEXT NOT NULL DEFAULT 'customer' CHECK (relation IN ('customer','partner')),
+        source TEXT, notes TEXT, created_by TEXT NOT NULL DEFAULT 'user',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (customer_id, supplier_id));
+      INSERT INTO companies (id, market, ticker, name) VALUES ('TW:2330','TW','2330','台積電'), ('TW:00981A','TW','00981A','ETF');
+      INSERT INTO edges (customer_id, supplier_id, revenue_share, relation) VALUES ('TW:2330','TW:00981A',0.5,'partner');
+    """)
+    s.commit()
+    s.close()
+    c = db.connect(old)
+    e = core.add_edge(c, "TW:2330", "TW:00981A", 0.1184, relation="holding", source="MoneyDJ 2026-10-30")
+    assert e["relation"] == "holding" and e["revenue_share"] == 0.1184
+    assert len(core.export_graph(c)["edges"]) == 1  # upsert kept the single row
+
+
+def test_etf_holding_exposure(conn):
+    core.upsert_company(conn, "TW", "00981A", "ETF", sector="ETF")
+    core.upsert_position(conn, "TW:00981A", "hold", "core", position_pct=100)
+    core.add_edge(conn, "TW:2330", "TW:00981A", 0.1184, relation="holding")
+    ex = core.indirect_exposure(conn, "TW:2330")
+    assert [e["company_id"] for e in ex["exposures"]] == ["TW:00981A"]
+    assert ex["exposures"][0]["exposure_pct"] == pytest.approx(11.84)
+    # two hops: NVDA -> TSMC (10%) -> ETF (11.84%) on a 100% position
+    nv = core.indirect_exposure(conn, "US:NVDA")
+    etf = [e for e in nv["exposures"] if e["company_id"] == "TW:00981A"][0]
+    assert etf["exposure_pct"] == pytest.approx(1.18, abs=0.01)

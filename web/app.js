@@ -13,7 +13,7 @@ const L = {
   signal: { no_data: "無資料", on_track: "符合", ahead: "超前", behind: "落後", weakened: "被削弱" },
   cstatus: { pending: "待確認", confirmed: "已確認", missed: "未達成" },
   metric: { revenue_m: "月營收", revenue_q: "季營收", gross_margin: "毛利率", opex: "營業費用", eps: "EPS", shares: "股數" },
-  relation: { customer: "客戶", partner: "夥伴" },
+  relation: { customer: "客戶", partner: "夥伴", holding: "成分股" },
 };
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const pct = (v) => v == null ? "?" : Math.round(v * 100) + "%";
@@ -132,7 +132,7 @@ function renderCard(p) {
   const c = p.concentration;
   const concBadge = c.largest_customer ? `<span class="badge ${{ high: "hi", medium: "mid", low: "lo" }[c.flag]}">最大客戶 ${esc(c.largest_customer_name)} ${pct(c.largest_customer_share)}</span>` : '<span class="kv">尚無客戶資料</span>';
   const rel = (list, key, nameKey, dir) => list.length ? list.map((e) => `
-      <div class="rel"><span>${e.relation === "partner" ? "夥伴" : dir} <a data-open="${e[key]}">${esc(e[nameKey])}</a> <span class="kv">${e[key]}</span></span>
+      <div class="rel"><span>${e.relation === "partner" ? "夥伴" : e.relation === "holding" ? (dir === "客戶" ? "成分股" : "被持有於") : dir} <a data-open="${e[key]}">${esc(e[nameKey])}</a> <span class="kv">${e[key]}</span></span>
         <span class="kv">${pct(e.revenue_share)} · ${e.lag_days ?? "?"} 天 · 信心${L.conf[e.confidence]}</span></div>`).join("") : '<div class="kv">無</div>';
   const linkOpts = `<option value="">不關聯</option>${p.drivers.map((d) => `<option value="d:${d.id}">驅動：${esc(d.name)}</option>`).join("")}${p.checkpoints.filter((k) => k.status === "pending").map((k) => `<option value="c:${k.id}">檢查點：${esc(k.title)}</option>`).join("")}`;
   const health = p.health.issues.length ? `<div class="warn-box"><b>健康度警示</b><ul class="issues">${p.health.issues.map((i) => `<li class="${i.severity}">${esc(i.message)}</li>`).join("")}</ul>${p.health.suggest_shaken ? '<div class="kv">有高嚴重度問題而論點仍標成立。建議改為動搖，或處理上面的項目。</div>' : ""}</div>` : '<div class="ok-box">健康度正常：沒有逾期檢查點、落後的驅動因子或偏離的指標。</div>';

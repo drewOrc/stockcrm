@@ -245,7 +245,8 @@ def propose_edge(customer: str, supplier: str, rationale: str, revenue_share: fl
     """Propose a new or updated edge. relation=customer: customer buys from supplier; revenue_share is the
     fraction (0..1) of the SUPPLIER's revenue from this customer. relation=partner: capacity or licensing
     partner (put the partner as customer, our company as supplier; revenue_share = share of our revenue
-    that depends on the partner). confidence: high|medium|low. Both companies must exist."""
+    that depends on the partner). relation=holding: customer = constituent stock, supplier = the ETF/fund,
+    revenue_share = the constituent's weight in the fund. confidence: high|medium|low. Both companies must exist."""
     with _conn() as c:
         payload = {"customer_id": core.resolve_company(c, customer)["id"],
                    "supplier_id": core.resolve_company(c, supplier)["id"],

@@ -14,6 +14,8 @@ Enumerations (closed lists; agents must not invent new values):
   proposal.status: pending | approved | rejected
   edge.confidence: high | medium | low
   edge.relation: customer (customer buys from supplier) | partner (capacity/licensing partner)
+                 | holding (customer_id = constituent stock, supplier_id = the ETF/fund that holds it;
+                   revenue_share = weight of the constituent in the fund)
   value.kind:    model | actual
   checkpoint.status: pending | confirmed | missed
   metric:        revenue_m | revenue_q | gross_margin | opex | eps | shares
@@ -39,7 +41,7 @@ PROPOSAL_KINDS = ("interaction", "edge", "thesis_status", "reminder",
                   "driver", "driver_value", "checkpoint", "checkpoint_resolve", "metric")
 PROPOSAL_STATUSES = ("pending", "approved", "rejected")
 CONFIDENCES = ("high", "medium", "low")
-RELATIONS = ("customer", "partner")
+RELATIONS = ("customer", "partner", "holding")
 VALUE_KINDS = ("model", "actual")
 CHECKPOINT_STATUSES = ("pending", "confirmed", "missed")
 METRICS = ("revenue_m", "revenue_q", "gross_margin", "opex", "eps", "shares")
@@ -60,6 +62,7 @@ CREATE TABLE IF NOT EXISTS companies (
 
 -- Directed relationship. relation='customer': customer buys from supplier.
 -- relation='partner': capacity / licensing partner (customer_id = the partner, supplier_id = our company).
+-- relation='holding': customer_id = constituent stock, supplier_id = the fund; revenue_share = weight in fund.
 CREATE TABLE IF NOT EXISTS edges (
   id            INTEGER PRIMARY KEY,
   customer_id   TEXT NOT NULL REFERENCES companies(id),
@@ -67,7 +70,7 @@ CREATE TABLE IF NOT EXISTS edges (
   revenue_share REAL,                  -- share of SUPPLIER revenue that comes from CUSTOMER, 0..1, nullable if unknown
   lag_days      INTEGER,               -- typical delay from customer news to supplier revenue impact
   confidence    TEXT NOT NULL DEFAULT 'medium' CHECK (confidence IN ('high','medium','low')),
-  relation      TEXT NOT NULL DEFAULT 'customer' CHECK (relation IN ('customer','partner')),
+  relation      TEXT NOT NULL DEFAULT 'customer' CHECK (relation IN ('customer','partner','holding')),
   source        TEXT,
   notes         TEXT,
   created_by    TEXT NOT NULL DEFAULT 'user',
@@ -255,6 +258,26 @@ def _migrate(conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+    # edges.relation CHECK predates 'holding'; rebuild the table when the old constraint is present.
+    sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='edges'").fetchone()
+    if sql and "relation IN ('customer','partner'))" in sql[0]:
+        conn.executescript("""
+            ALTER TABLE edges RENAME TO edges_old;
+            CREATE TABLE edges (
+              id INTEGER PRIMARY KEY, customer_id TEXT NOT NULL REFERENCES companies(id),
+              supplier_id TEXT NOT NULL REFERENCES companies(id), revenue_share REAL, lag_days INTEGER,
+              confidence TEXT NOT NULL DEFAULT 'medium' CHECK (confidence IN ('high','medium','low')),
+              relation TEXT NOT NULL DEFAULT 'customer' CHECK (relation IN ('customer','partner','holding')),
+              source TEXT, notes TEXT, created_by TEXT NOT NULL DEFAULT 'user',
+              created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (customer_id, supplier_id));
+            INSERT INTO edges (id, customer_id, supplier_id, revenue_share, lag_days, confidence, relation, source, notes,
+                               created_by, created_at)
+              SELECT id, customer_id, supplier_id, revenue_share, lag_days, confidence, relation, source, notes,
+                     created_by, created_at FROM edges_old;
+            DROP TABLE edges_old;
+            CREATE INDEX IF NOT EXISTS idx_edges_customer ON edges(customer_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_supplier ON edges(supplier_id);
+        """)
     # proposals.kind used to carry a CHECK constraint listing the first four kinds; rebuild if so.
     sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='proposals'").fetchone()
     if sql and "CHECK (kind IN" in sql[0]:

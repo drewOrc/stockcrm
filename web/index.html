@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stock CRM</title>
-<link rel="stylesheet" href="/static/style.css?v=0.3">
+<link rel="stylesheet" href="/static/style.css?v=0.4">
 </head>
 <body>
 <header>
@@ -26,7 +26,7 @@
   <section id="tab-graph" class="tab">
     <div class="graph-toolbar">
       <span class="legend"><i class="sw core"></i>核心 <i class="sw satellite"></i>衛星 <i class="sw watch"></i>觀察 <i class="sw blacklist"></i>黑名單 <i class="sw none"></i>無卡片</span>
-      <span class="hint">線寬 = 客戶佔供應商營收比重，橘線 = 夥伴關係。點節點看卡片。</span>
+      <span class="hint">線寬 = 客戶佔供應商營收比重，橘線 = 夥伴，綠線 = ETF 成分股。點節點看卡片。</span>
       <button id="btn-edge" class="ghost">＋ 新增關係</button>
     </div>
     <div id="graph" class="graph"></div>
@@ -73,7 +73,7 @@
 <dialog id="dlg-edge">
   <form method="dialog" id="form-edge">
     <h3>新增關係</h3>
-    <label>關係類型<select name="relation"><option value="customer">客戶 → 供應商（客戶向供應商採購）</option><option value="partner">夥伴 → 我方（產能或授權夥伴）</option></select></label>
+    <label>關係類型<select name="relation"><option value="customer">客戶 → 供應商（客戶向供應商採購）</option><option value="partner">夥伴 → 我方（產能或授權夥伴）</option><option value="holding">成分股 → ETF（比重 = 成分股在基金的權重）</option></select></label>
     <label>客戶 / 夥伴<select name="customer_id" id="sel-customer"></select></label>
     <label>供應商 / 我方<select name="supplier_id" id="sel-supplier"></select></label>
     <div class="row">
@@ -88,6 +88,6 @@
   </form>
 </dialog>
 
-<script src="/static/app.js?v=0.3"></script>
+<script src="/static/app.js?v=0.4"></script>
 </body>
 </html>
