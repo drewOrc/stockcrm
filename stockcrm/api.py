@@ -52,7 +52,7 @@ def _identity_from_headers(req: Request) -> int | None:
 async def user_context(req: Request, call_next):
     user_id = _identity_from_headers(req)
     if user_id is None:
-        if MULTIUSER and req.url.path.startswith("/api/"):
+        if MULTIUSER and req.url.path.startswith("/api/") and req.url.path != "/api/health":
             return JSONResponse({"detail": "identity required: use the unified UI on the engine (http://127.0.0.1:8000); "
                                            "direct calls need X-User-Id + X-Facade-Token"}, status_code=401)
         user_id = 1
@@ -81,6 +81,16 @@ async def body(req: Request) -> dict[str, Any]:
         return await req.json()
     except Exception:
         raise HTTPException(400, "invalid JSON body")
+
+
+@app.get("/api/health")
+def health_check():
+    """Liveness for the engine / supervisors. Needs no identity and leaks nothing personal."""
+    with conn() as c:
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        return {"ok": True, "service": "stockcrm", "version": app.version, "multiuser": MULTIUSER,
+                "db": str(db.DB_PATH), "shared_db": all(t in tables for t in db.KNOWLEDGE_TABLES),
+                "users": c.execute("SELECT COUNT(*) FROM users").fetchone()[0]}
 
 
 @app.get("/api/me")
