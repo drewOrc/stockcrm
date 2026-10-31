@@ -71,6 +71,17 @@ powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1 -MorningAt
 - **19:30 StockCRM Evening Fetch**：只抓官方資料（月營收在每月 1 到 10 號收盤後陸續公布）。
 - 找不到 `claude` 指令時會自動用 Claude 桌面版附帶的那份，或用環境變數 `STOCKCRM_CLAUDE` 指定；CLI 要先登入過一次（`claude` 然後 `/login`）。
 
+### 伺服器常駐
+
+本機的 8765 由 `twstock-tracker/scripts/service_install.ps1` 註冊的工作排程「TWStock CRM」常駐（登入時啟動、當機 5 秒內重啟）。
+不要再手動 `python -m stockcrm.api`，會撞 port；要重啟用：
+
+```powershell
+Stop-ScheduledTask 'TWStock CRM'; Start-ScheduledTask 'TWStock CRM'
+```
+
+日誌在 `twstock-tracker/data/logs/crm-supervisor.log`。只在開發或沒裝那個任務的機器上才手動啟動。
+
 ## 畫面
 
 - **看板**：依階段分欄，卡片顏色是分層，顯示論點狀態、幾天沒更新、健康度警示數。
