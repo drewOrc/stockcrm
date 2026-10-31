@@ -329,3 +329,51 @@ def test_reset_and_rename_cover_briefs(conn):
     assert core.list_briefs(conn, "TW:9999")[0]["content"] == "伺服器 ODM。"
     core.reset_data(conn)
     assert conn.execute("SELECT COUNT(*) FROM company_briefs").fetchone()[0] == 0
+
+
+def test_shares_avg_cost_and_alert_kind(conn):
+    p = core.upsert_position(conn, "TW:2330", "hold", "core", shares=3000, avg_cost=29.44)
+    assert p["shares"] == 3000 and p["avg_cost"] == 29.44
+    row = [r for r in core.list_positions(conn) if r["company_id"] == "TW:2330"][0]
+    assert row["shares"] == 3000 and "target_price" in row and "stop_price" in row
+    i = core.add_interaction(conn, p["id"], "alert", "[引擎警示] price_above 1500 觸發", price=1501,
+                             created_by="engine:t")
+    assert i["kind"] == "alert"
+
+
+def test_alert_kind_migration_keeps_checkpoint_reference(tmp_path):
+    import sqlite3
+    old = tmp_path / "a.db"
+    s = sqlite3.connect(old)
+    s.executescript("""
+      CREATE TABLE companies (id TEXT PRIMARY KEY, market TEXT, ticker TEXT, name TEXT, name_en TEXT, sector TEXT,
+        notes TEXT, created_at TEXT);
+      CREATE TABLE positions (id INTEGER PRIMARY KEY, company_id TEXT UNIQUE, stage TEXT, tier TEXT, thesis TEXT,
+        invalidation TEXT, thesis_status TEXT DEFAULT 'intact', target_price REAL, stop_price REAL,
+        position_pct REAL DEFAULT 0, idea_source TEXT, tags TEXT DEFAULT '[]', created_at TEXT, updated_at TEXT);
+      CREATE TABLE drivers (id INTEGER PRIMARY KEY, position_id INTEGER, name TEXT);
+      CREATE TABLE interactions (id INTEGER PRIMARY KEY,
+        position_id INTEGER NOT NULL REFERENCES positions(id) ON DELETE CASCADE,
+        ts TEXT NOT NULL DEFAULT (datetime('now')),
+        kind TEXT NOT NULL CHECK (kind IN ('buy','sell','add','trim','news','earnings','call','thought','review')),
+        content TEXT NOT NULL, price REAL, behavior_tags TEXT NOT NULL DEFAULT '[]', source_url TEXT,
+        created_by TEXT NOT NULL DEFAULT 'user', created_at TEXT NOT NULL DEFAULT (datetime('now')));
+      CREATE TABLE checkpoints (id INTEGER PRIMARY KEY, position_id INTEGER NOT NULL, driver_id INTEGER, title TEXT NOT NULL,
+        expected_by TEXT NOT NULL, evidence_needed TEXT, status TEXT NOT NULL DEFAULT 'pending', evidence TEXT,
+        interaction_id INTEGER REFERENCES interactions(id) ON DELETE SET NULL, decided_at TEXT,
+        created_by TEXT NOT NULL DEFAULT 'user', created_at TEXT NOT NULL DEFAULT (datetime('now')));
+      INSERT INTO companies (id, market, ticker, name) VALUES ('TW:2330','TW','2330','台積電');
+      INSERT INTO positions (company_id, stage, tier) VALUES ('TW:2330','hold','core');
+      INSERT INTO interactions (position_id, kind, content) VALUES (1, 'buy', 'x');
+      INSERT INTO checkpoints (position_id, title, expected_by, status, interaction_id) VALUES (1, 'k', '2026-01-01', 'confirmed', 1);
+    """)
+    s.commit()
+    s.close()
+    c = db.connect(old)
+    sql = c.execute("SELECT sql FROM sqlite_master WHERE name='interactions'").fetchone()[0]
+    assert "'alert'" in sql
+    assert c.execute("SELECT COUNT(*) FROM interactions").fetchone()[0] == 1
+    fk = c.execute("SELECT sql FROM sqlite_master WHERE name='checkpoints'").fetchone()[0]
+    assert "REFERENCES interactions(id)" in fk
+    core.add_interaction(c, 1, "alert", "[引擎警示] test", price=1)
+    assert c.execute("PRAGMA foreign_key_check").fetchall() == []

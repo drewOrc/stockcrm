@@ -9,7 +9,9 @@
   - `stage`：watch（觀察）/ hold（持有）/ exited（已出場）
   - `tier`：core（核心，上限 15%）/ satellite（衛星，上限 5%）/ watch / blacklist。上限在 `tier_rules`。
   - `thesis`（投資論點）、`invalidation`（失效條件）、`thesis_status`：intact / shaken / broken
-- **互動紀錄（interactions）** 是 CRM 的聯絡紀錄：buy / sell / add / trim / news / earnings / call / thought / review。
+  - `shares`（持有股數）、`avg_cost`（平均成本）、`target_price` / `stop_price`：引擎每 15 分鐘讀這些建到價警示
+- **互動紀錄（interactions）** 是 CRM 的聯絡紀錄：buy / sell / add / trim / news / earnings / call / thought / review / alert。
+  `alert` 是引擎的到價／停損警示觸發後透過提案送進來的，agent 不要自己用。
   可以掛到一個驅動因子或檢查點上，並標 `effect`：supports / weakens / confirms。這是證據累積的方式。
 - **提案（proposals）** 是 agent 的寫入通道。使用者在網頁上核准後才會套用。
 - **公司簡介（company_briefs）**：`profile`（公司在做什麼，穩定）與 `highlights`（近期重點，有日期）。

@@ -79,7 +79,7 @@ async def upsert_position(req: Request):
         p = guard(core.upsert_position, c, b["company_id"], b["stage"], b["tier"], b.get("thesis"),
                   b.get("invalidation"), b.get("target_price"), b.get("stop_price"), b.get("position_pct"),
                   b.get("idea_source"), b.get("tags"), b.get("thesis_status"), b.get("target_basis"),
-                  b.get("model_url"))
+                  b.get("model_url"), b.get("shares"), b.get("avg_cost"))
         if b.get("template"):
             guard(core.apply_template, c, p["id"], b["template"])
             p = core.get_position(c, p["id"])
